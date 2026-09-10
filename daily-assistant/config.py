@@ -43,17 +43,17 @@ UPTIME_KUMA_URL = os.getenv("UPTIME_KUMA_URL", "http://127.0.0.1:3001")
 
 # Google OAuth credentials paths (falls back across known locations)
 POSSIBLE_CREDS = [
+    SCRIPT_DIR / "credentials.json",
     VAULT_PATH / "Life Dashboard" / "Productivity" / "credentials.json",
     Path("/Users/user/Documents/antigravity/resilient-pasteur/credentials.json"),
-    SCRIPT_DIR / "credentials.json",
 ]
 GOOGLE_CREDENTIALS_PATH = next((p for p in POSSIBLE_CREDS if p.exists()), POSSIBLE_CREDS[0])
 GMAIL_CREDENTIALS_PATH = GOOGLE_CREDENTIALS_PATH
 
 POSSIBLE_TOKEN_DIRS = [
+    SCRIPT_DIR,
     VAULT_PATH / "Life Dashboard" / "Productivity",
     Path("/Users/user/Documents/antigravity/resilient-pasteur"),
-    SCRIPT_DIR,
 ]
 GOOGLE_TOKENS_DIR = next((d for d in POSSIBLE_TOKEN_DIRS if (d / "token_1.json").exists()), POSSIBLE_TOKEN_DIRS[0])
 GMAIL_TOKENS_DIR = GOOGLE_TOKENS_DIR

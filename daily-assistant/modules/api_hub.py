@@ -572,3 +572,61 @@ class ApiHub:
 
         return result
 
+    @staticmethod
+    def extract_system_incidents(api_data: Dict[str, any]) -> List[str]:
+        """
+        Scans polled system metrics for outages, degraded performance, unauthorized scopes,
+        or impending failures. Returns a list of actionable issue summaries that must be
+        investigated as To-dos.
+        """
+        incidents = []
+
+        # 1. Website Status (DroidZero)
+        website = api_data.get("website", {})
+        web_status = str(website.get("status", "")).lower()
+        if web_status in ("offline", "degraded", "error"):
+            msg = website.get("message", "Website unreachable")
+            incidents.append(f"Investigate DroidZero website downtime ({msg})")
+        else:
+            ssl_days = website.get("ssl_days_left")
+            if ssl_days is not None:
+                try:
+                    if int(ssl_days) < 14:
+                        incidents.append(f"Renew DroidZero SSL certificate: expires in {ssl_days} days")
+                except (ValueError, TypeError):
+                    pass
+
+        # 2. Server Instance Health (OCI VM)
+        instance = api_data.get("instance", {})
+        disk_free = instance.get("disk_free_gb")
+        if disk_free is not None:
+            try:
+                if float(disk_free) < 10.0:
+                    incidents.append(f"Free up OCI server disk space: only {disk_free} GB remaining")
+            except (ValueError, TypeError):
+                pass
+        inst_status = str(instance.get("status", "")).lower()
+        if "high load" in inst_status:
+            incidents.append(f"Investigate OCI server high CPU load: {instance.get('load_avg', 'N/A')}")
+
+        # 3. Google Calendar Sync
+        cal = api_data.get("calendar", {})
+        cal_status = str(cal.get("status", "")).lower()
+        if "reauth" in cal_status or "scope not authorized" in cal_status:
+            incidents.append("Reauthorize Google Calendar API: Run `python3 reauth_google.py` in terminal to restore calendar sync")
+        elif "error" in cal_status or "failed" in cal_status:
+            incidents.append(f"Investigate Google Calendar sync failure: {cal.get('status')}")
+
+        # 4. Gmail Inboxes Triage
+        gmail = api_data.get("gmail", {})
+        gmail_status = str(gmail.get("status", "")).lower()
+        if "error" in gmail_status or "failed" in gmail_status or ("action" in gmail_status and "auth" in gmail_status):
+            incidents.append(f"Investigate Gmail API failure: {gmail.get('status')}")
+
+        # 5. Weather Feed
+        weather = api_data.get("weather", {})
+        if weather.get("status") == "Unavailable" or "error" in str(weather.get("summary", "")).lower():
+            incidents.append("Investigate Chicago weather API failure (Open-Meteo endpoint unreachable)")
+
+        return incidents
+

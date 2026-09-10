@@ -112,13 +112,21 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         "calendar": calendar_data
     }
 
+    # Extract any down systems or warnings to convert into investigation to-dos
+    system_incidents = ApiHub.extract_system_incidents(api_data)
+    if system_incidents:
+        print(f"    ⚠️ Detected {len(system_incidents)} system incident(s) requiring investigation.")
+        for inc in system_incidents:
+            print(f"       - {inc}")
+
     # 5. Synthesize note via Gemini (or fallback template)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] ✨ Formatting note via Gemini ({config.GEMINI_MODEL})...")
     note_content = gemini_client.generate_daily_note(
         today=target_date,
         previous_note_data=prev_data,
         workout_data=workout_data,
-        api_data=api_data
+        api_data=api_data,
+        system_incidents=system_incidents
     )
 
     # 6. Target file path

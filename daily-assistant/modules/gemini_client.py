@@ -32,7 +32,8 @@ class GeminiClient:
         today: date,
         previous_note_data: Dict[str, any],
         workout_data: Dict[str, any],
-        api_data: Dict[str, any]
+        api_data: Dict[str, any],
+        system_incidents: Optional[List[str]] = None
     ) -> str:
         """
         Calls Gemini to format and synthesize the daily note.
@@ -44,7 +45,7 @@ class GeminiClient:
         if self.api_key:
             # 1. Try direct REST API first (zero external pip packages required)
             try:
-                text = self._call_gemini_rest_api(today_str, weekday_name, previous_note_data, workout_data, api_data)
+                text = self._call_gemini_rest_api(today_str, weekday_name, previous_note_data, workout_data, api_data, system_incidents)
                 if text:
                     return text
             except Exception as e:
@@ -52,13 +53,13 @@ class GeminiClient:
 
             # 2. Try SDK if installed
             try:
-                text = self._call_gemini_sdk(today_str, weekday_name, previous_note_data, workout_data, api_data)
+                text = self._call_gemini_sdk(today_str, weekday_name, previous_note_data, workout_data, api_data, system_incidents)
                 if text:
                     return text
             except Exception as e:
                 print(f"[GeminiClient] SDK invocation error ({e}); using deterministic generation.")
 
-        return self._deterministic_generation(today_str, weekday_name, previous_note_data, workout_data, api_data)
+        return self._deterministic_generation(today_str, weekday_name, previous_note_data, workout_data, api_data, system_incidents)
 
     def _build_prompt(
         self,
@@ -66,7 +67,8 @@ class GeminiClient:
         weekday_name: str,
         prev: Dict[str, any],
         workout: Dict[str, any],
-        apis: Dict[str, any]
+        apis: Dict[str, any],
+        system_incidents: Optional[List[str]] = None
     ) -> str:
         workout_lines = []
         for ex in workout.get('exercises', []):
@@ -106,6 +108,9 @@ Desk Posture Cue: {workout.get('desk_mobility')}
 - Gmail Triage: {apis.get('gmail', {}).get('status', 'Ready')}
 - Google Calendar: {cal_data.get('status', 'Ready')}
 - Market Overview: {markets_str}
+
+6. System Health Alerts / Incidents Requiring Action:
+{chr(10).join(f"- 🚨 {inc}" for inc in (system_incidents or [])) if system_incidents else "All systems fully operational."}
 ---
 
 Formatting Guidelines:
@@ -118,13 +123,14 @@ Formatting Guidelines:
      - List each Google Calendar event for today with interactive checkboxes: `- [ ] ⏰ 09:00 AM – 10:00 AM: Meeting Title ([Join Meet](url)) *(Account A)*` or `- [ ] 🗓️ All Day: Event Name`.
      - If there are no scheduled events, output: `*No scheduled calendar events today.*`
      ### 📋 Priorities & Tasks
-     - CRITICAL: Review all items in "Yesterday's Scratchpad & Tomorrow's Ideas" and convert EVERY thought, errand, reminder, or idea into an actionable checklist task `- [ ]` (e.g., "Put on the agenda tomorrow to schedule my swim session" -> `- [ ] Schedule morning swim session`; "I also need to order groceries" -> `- [ ] Order groceries`).
+     - CRITICAL - SYSTEM OUTAGES & WARNINGS: If any system is down, degraded, or requires reauthorization (listed in "System Health Alerts / Incidents"), you MUST create an urgent checklist task `- [ ] ⚠️` at the TOP of Priorities & Tasks to investigate and fix it (e.g. `- [ ] ⚠️ Reauthorize Google Calendar API: Run python3 reauth_google.py in terminal`; `- [ ] 🚨 Investigate DroidZero downtime`).
+     - Convert EVERY thought, errand, reminder, or idea from "Yesterday's Scratchpad & Tomorrow's Ideas" into an actionable checklist task `- [ ]` (e.g., "Put on the agenda tomorrow to schedule my swim session" -> `- [ ] Schedule morning swim session`; "I also need to order groceries" -> `- [ ] Order groceries`).
      - Also carry over any unfinished `- [ ]` tasks from the previous note.
-     - Ensure no task or idea from yesterday's scratchpad is lost or omitted. List all converted tasks as clear `- [ ]` items.
+     - Ensure no task, idea, or system alert is lost or omitted. List all converted tasks as clear `- [ ]` items.
    - ## 🏋️ Workout: {workout.get('title')} (include the exact workout checklist, clickable diagram links, biometrics context, and desk worker posture cues).
    - ## 📊 Life Dashboard Pulse (compact table or bullets covering DroidZero, VM health, Gmail triage, Calendar sync status, and Market Watchlist).
    - ## 📝 Scratchpad & Tomorrow's Ideas (empty space for the user to jot notes during the day).
-3. Ensure all workout items have interactive checkboxes: `- [ ] [**Exercise Name**](URL) ↗ — target` and an indented line `  - Actual: \`___ lbs x ___ reps\`` for mobile logging.
+3. Ensure all workout items have interactive checkboxes: `- [ ] [**Exercise Name**](URL) ↗ — target` and an indented line `  - Actual: `___ lbs x ___ reps`` for mobile logging.
 4. Keep the output clean, sharp, and directly usable in Obsidian. Do not wrap in ```markdown code fences.
 """
 
@@ -134,10 +140,11 @@ Formatting Guidelines:
         weekday_name: str,
         prev: Dict[str, any],
         workout: Dict[str, any],
-        apis: Dict[str, any]
+        apis: Dict[str, any],
+        system_incidents: Optional[List[str]] = None
     ) -> Optional[str]:
         """Calls Google Gemini REST API directly without requiring any pip dependencies."""
-        prompt = self._build_prompt(today_str, weekday_name, prev, workout, apis)
+        prompt = self._build_prompt(today_str, weekday_name, prev, workout, apis, system_incidents)
 
         # Normalize model name for v1beta endpoint
         model = self.model_name.replace("models/", "")
@@ -195,10 +202,11 @@ Formatting Guidelines:
         weekday_name: str,
         prev: Dict[str, any],
         workout: Dict[str, any],
-        apis: Dict[str, any]
+        apis: Dict[str, any],
+        system_incidents: Optional[List[str]] = None
     ) -> Optional[str]:
         """Calls Gemini using google-genai or google-generativeai SDK if available."""
-        prompt = self._build_prompt(today_str, weekday_name, prev, workout, apis)
+        prompt = self._build_prompt(today_str, weekday_name, prev, workout, apis, system_incidents)
 
         try:
             from google import genai
@@ -221,13 +229,18 @@ Formatting Guidelines:
         weekday_name: str,
         prev: Dict[str, any],
         workout: Dict[str, any],
-        apis: Dict[str, any]
+        apis: Dict[str, any],
+        system_incidents: Optional[List[str]] = None
     ) -> str:
         """Deterministic high-quality fallback generator."""
         incomplete = prev.get("incomplete_tasks", [])
         scratch = prev.get("scratchpad_notes", [])
 
         tasks_md = []
+        if system_incidents:
+            for inc in system_incidents:
+                tasks_md.append(f"- [ ] ⚠️ {inc}")
+
         if incomplete:
             for task in incomplete:
                 tasks_md.append(f"- [ ] {task}")
@@ -298,11 +311,11 @@ type: daily-note
 
 | Service | Status & Metrics | Quick Action |
 | :--- | :--- | :--- |
-| **🌐 DroidZero Site** | {apis.get('website', {}).get('message', 'Online')} | [[00-DroidZero-Master-Hub\|Master Hub]] |
-| **🖥️ OCI Instance** | Load: `{apis.get('instance', {}).get('load_avg', 'N/A')}` • Disk Free: `{apis.get('instance', {}).get('disk_free_gb', 'N/A')}` | [[03-Infrastructure-and-Backend-API\|API Blueprint]] |
-| **📧 Gmail Inboxes** | {apis.get('gmail', {}).get('status', 'Ready')} | [[Subscriptions Report\|Subscriptions]] |
-| **📅 Google Calendar** | {cal_data.get('status', 'Ready')} | [[Dashboard\|Command Center]] |
-| **💪 Health Ledger** | Weight: `191 lbs` • Weekly weigh-in on Sunday | [[Health & Fitness\|Health Dashboard]] |
+| **🌐 DroidZero Site** | {apis.get('website', {}).get('message', 'Online')} | [[00-DroidZero-Master-Hub|Master Hub]] |
+| **🖥️ OCI Instance** | Load: `{apis.get('instance', {}).get('load_avg', 'N/A')}` • Disk Free: `{apis.get('instance', {}).get('disk_free_gb', 'N/A')}` | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
+| **📧 Gmail Inboxes** | {apis.get('gmail', {}).get('status', 'Ready')} | [[Subscriptions Report|Subscriptions]] |
+| **📅 Google Calendar** | {cal_data.get('status', 'Ready')} | [[Dashboard|Command Center]] |
+| **💪 Health Ledger** | Weight: `191 lbs` • Weekly weigh-in on Sunday | [[Health & Fitness|Health Dashboard]] |
 
 **📈 Markets & Tickers:**
 {market_lines if market_lines else "VOO • VTI • VT • QQQ • IGV • NOW • BTC • ETH"}
