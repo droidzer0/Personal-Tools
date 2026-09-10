@@ -34,6 +34,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
             yesterday_str = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
             rel_path = f"Daily/{yesterday_str}.md"
             subprocess.run(["livesync-cli", "pull", rel_path, f"/data/{rel_path}"], timeout=15, check=False)
+            health_rel = "Life Dashboard/Health/Health & Fitness.md"
+            subprocess.run(["livesync-cli", "pull", health_rel, f"/data/{health_rel}"], timeout=15, check=False)
         except Exception as e:
             print(f"    Notice: Pre-orchestration LiveSync pull encountered: {e}")
 
@@ -60,19 +62,48 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         prev_data = parser.parse_note_content(prev_path)
         print(f"    Carrying forward {len(prev_data['incomplete_tasks'])} incomplete tasks.")
         print(f"    Converting {len(prev_data['scratchpad_notes'])} scratchpad items from yesterday into to-dos.")
+
+        # Update Health & Fitness dashboard with working weights and PBs from previous day's workout
+        actuals = prev_data.get("workout_actuals", [])
+        if actuals:
+            print(f"    🏋️ Parsing {len(actuals)} logged workout actual(s) for Health Dashboard...")
+            pb_announcements = parser.update_pbs_in_health_file(
+                config.HEALTH_FILE,
+                prev_date,
+                actuals,
+                dry_run=dry_run
+            )
+            for ann in pb_announcements:
+                print(f"       {ann}")
     else:
         print("    No previous note found in rolling 14-day window. Initializing fresh start.")
         prev_data = {
             "incomplete_tasks": [],
             "completed_count": 0,
             "scratchpad_notes": [],
-            "workout_logs": []
+            "workout_logs": [],
+            "workout_actuals": [],
+            "skip_workout": False,
+            "skip_workout_reason": None
         }
 
     # 3. Get workout routine
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏋️ Determining today's workout & recovery plan...")
-    workout_data = workout_engine.get_today_routine(target_date)
-    print(f"    Selected routine: {workout_data['title']} ({workout_data['category']})")
+    if prev_data.get("skip_workout"):
+        workout_data = {
+            "title": "Rest Day (Workout Skipped)",
+            "category": "Rest & Recovery",
+            "goal": "Scheduled rest day as requested in yesterday's scratchpad.",
+            "exercises": [],
+            "desk_mobility": "Gentle stretches and walk as desired.",
+            "skipped": True,
+            "skip_reason": prev_data.get("skip_workout_reason")
+        }
+        print(f"    🛑 Workout skipped today based on yesterday's scratchpad: \"{prev_data.get('skip_workout_reason')}\"")
+    else:
+        workout_data = workout_engine.get_today_routine(target_date)
+        workout_data["skipped"] = False
+        print(f"    Selected routine: {workout_data['title']} ({workout_data['category']})")
 
     # 4. Gather Live API metrics
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🌐 Gathering Life Dashboard & external API metrics...")
@@ -162,9 +193,11 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     import subprocess
     if shutil.which("livesync-cli"):
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Pushing newly created note to CouchDB via livesync-cli...")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Pushing newly created note and Health Dashboard to CouchDB via livesync-cli...")
             rel_path = f"Daily/{target_date.strftime('%Y-%m-%d')}.md"
             subprocess.run(["livesync-cli", "push", f"/data/{rel_path}", rel_path], timeout=30, check=False)
+            health_rel = "Life Dashboard/Health/Health & Fitness.md"
+            subprocess.run(["livesync-cli", "push", f"/data/{health_rel}", health_rel], timeout=30, check=False)
             subprocess.run(["livesync-cli", "sync"], timeout=30, check=False)
         except Exception as e:
             print(f"    Notice: livesync-cli push/sync prior to notification encountered: {e}")

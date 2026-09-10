@@ -86,9 +86,12 @@ class Notifier:
 
         # 2. Workout snippet
         if workout_data:
-            w_title = workout_data.get("title", "")
-            if w_title:
-                preview_parts.append(f"🏋️ {w_title}")
+            if workout_data.get("skipped", False):
+                preview_parts.append("🛋️ Rest Day")
+            else:
+                w_title = workout_data.get("title", "")
+                if w_title:
+                    preview_parts.append(f"🏋️ {w_title}")
 
         # 3. Rollover tasks count
         if prev_data and "incomplete_tasks" in prev_data:

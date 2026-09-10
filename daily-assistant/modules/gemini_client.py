@@ -70,15 +70,26 @@ class GeminiClient:
         apis: Dict[str, any],
         system_incidents: Optional[List[str]] = None
     ) -> str:
-        workout_lines = []
-        for ex in workout.get('exercises', []):
-            url_part = f"[{ex['name']}]({ex.get('url', 'https://musclewiki.com')}) ↗"
-            workout_lines.append(f"- [ ] **{url_part}** — {ex['target']} (Cue: {ex['cue']})")
-
         cal_data = apis.get('calendar', {})
         cal_lines = cal_data.get('calendar_lines', [])
         cal_summary_str = '\n'.join(cal_lines) if cal_lines else "No scheduled calendar events today."
         markets_str = ', '.join(q.get('display', '') for q in apis.get('markets', []))
+
+        is_workout_skipped = workout.get("skipped", False)
+        if is_workout_skipped:
+            workout_section_input = "4. Workout Status: USER IS SKIPPING WORKOUT TODAY (explicitly requested in yesterday's scratchpad). DO NOT GENERATE ANY WORKOUT SECTION."
+            workout_format_instruction = "- WORKOUT SECTION: Do NOT output any '## 🏋️ Workout' section today. The user explicitly chose to skip the workout. Completely omit the workout section."
+        else:
+            workout_lines = []
+            for ex in workout.get('exercises', []):
+                url_part = f"[{ex['name']}]({ex.get('url', 'https://musclewiki.com')}) ↗"
+                workout_lines.append(f"- [ ] **{url_part}** — {ex['target']} (Cue: {ex['cue']})")
+            workout_section_input = f"""4. Today's Scheduled Workout ({workout.get('title')}):
+Goal: {workout.get('goal')}
+Exercises:
+{chr(10).join(workout_lines)}
+Desk Posture Cue: {workout.get('desk_mobility')}"""
+            workout_format_instruction = f"- ## 🏋️ Workout: {workout.get('title')} (include the exact workout checklist, clickable diagram links, biometrics context, and desk worker posture cues)."
 
         return f"""
 You are an executive assistant and athletic performance coach formatting a daily Obsidian note for {today_str} ({weekday_name}).
@@ -95,11 +106,7 @@ Input Data:
 3. Today's Google Calendar Events & Schedule:
 {cal_summary_str}
 
-4. Today's Scheduled Workout ({workout.get('title')}):
-Goal: {workout.get('goal')}
-Exercises:
-{chr(10).join(workout_lines)}
-Desk Posture Cue: {workout.get('desk_mobility')}
+{workout_section_input}
 
 5. Life Dashboard & System Status:
 - Website (DroidZero): {apis.get('website', {}).get('message', 'Online')}
@@ -127,10 +134,10 @@ Formatting Guidelines:
      - Convert EVERY thought, errand, reminder, or idea from "Yesterday's Scratchpad & Tomorrow's Ideas" into an actionable checklist task `- [ ]` (e.g., "Put on the agenda tomorrow to schedule my swim session" -> `- [ ] Schedule morning swim session`; "I also need to order groceries" -> `- [ ] Order groceries`).
      - Also carry over any unfinished `- [ ]` tasks from the previous note.
      - Ensure no task, idea, or system alert is lost or omitted. List all converted tasks as clear `- [ ]` items.
-   - ## 🏋️ Workout: {workout.get('title')} (include the exact workout checklist, clickable diagram links, biometrics context, and desk worker posture cues).
+   {workout_format_instruction}
    - ## 📊 Life Dashboard Pulse (compact table or bullets covering DroidZero, VM health, Gmail triage, Calendar sync status, and Market Watchlist).
    - ## 📝 Scratchpad & Tomorrow's Ideas (empty space for the user to jot notes during the day).
-3. Ensure all workout items have interactive checkboxes: `- [ ] [**Exercise Name**](URL) ↗ — target` and an indented line `  - Actual: `___ lbs x ___ reps`` for mobile logging.
+3. Ensure all workout items (if workout is active today) have interactive checkboxes: `- [ ] [**Exercise Name**](URL) ↗ — target` and an indented line `  - Actual: `___ lbs x ___ reps`` for mobile logging.
 4. Keep the output clean, sharp, and directly usable in Obsidian. Do not wrap in ```markdown code fences.
 """
 
@@ -266,12 +273,28 @@ Formatting Guidelines:
         todo_blocks.append("\n### 📋 Priorities & Tasks")
         todo_blocks.extend(tasks_md)
 
-        workout_exercises = []
-        for ex in workout.get("exercises", []):
-            url_part = f"[{ex['name']}]({ex.get('url', 'https://musclewiki.com')}) ↗"
-            workout_exercises.append(f"- [ ] **{url_part}** — {ex['target']}")
-            workout_exercises.append(f"  - Form Cue: *{ex['cue']}*")
-            workout_exercises.append(f"  - Actual: `___ lbs x ___ reps`")
+        is_workout_skipped = workout.get("skipped", False)
+        if is_workout_skipped:
+            workout_section_md = ""
+        else:
+            workout_exercises = []
+            for ex in workout.get("exercises", []):
+                url_part = f"[{ex['name']}]({ex.get('url', 'https://musclewiki.com')}) ↗"
+                workout_exercises.append(f"- [ ] **{url_part}** — {ex['target']}")
+                workout_exercises.append(f"  - Form Cue: *{ex['cue']}*")
+                workout_exercises.append(f"  - Actual: `___ lbs x ___ reps`")
+
+            workout_section_md = f"""---
+
+## 🏋️ Workout: {workout.get('title')}
+> **Category:** {workout.get('category')} • **Target Goal:** {workout.get('goal')}
+> **Biometrics:** Current BMI: `{workout.get('current_bmi', 27.4)}` • Goal: `165–170 lbs` (`-{workout.get('weight_to_lose', 23.5)} lbs` to target)
+
+{chr(10).join(workout_exercises)}
+
+> [!TIP]
+> **Desk Worker Posture Cue:** {workout.get('desk_mobility')}
+"""
 
         market_lines = " • ".join(q.get("display", "") for q in apis.get("markets", []))
 
@@ -293,18 +316,7 @@ type: daily-note
 ## 🎯 To-do
 
 {chr(10).join(todo_blocks)}
-
----
-
-## 🏋️ Workout: {workout.get('title')}
-> **Category:** {workout.get('category')} • **Target Goal:** {workout.get('goal')}
-> **Biometrics:** Current BMI: `{workout.get('current_bmi', 27.4)}` • Goal: `165–170 lbs` (`-{workout.get('weight_to_lose', 23.5)} lbs` to target)
-
-{chr(10).join(workout_exercises)}
-
-> [!TIP]
-> **Desk Worker Posture Cue:** {workout.get('desk_mobility')}
-
+{workout_section_md}
 ---
 
 ## 📊 Life Dashboard Pulse
