@@ -87,8 +87,8 @@ Input Data:
 1. Unfinished Tasks from Previous Note:
 {chr(10).join(f"- [ ] {t}" for t in prev.get('incomplete_tasks', [])) if prev.get('incomplete_tasks') else "- [ ] Review project priorities and define top daily goals"}
 
-2. Scratchpad & Rollover Notes from Previous Note:
-{chr(10).join(f"- {s}" for s in prev.get('scratchpad_notes', [])) if prev.get('scratchpad_notes') else "No rollover notes."}
+2. Yesterday's Scratchpad & Tomorrow's Ideas (Convert each of these notes/thoughts into actionable tasks):
+{chr(10).join(f"- {s}" for s in prev.get('scratchpad_notes', [])) if prev.get('scratchpad_notes') else "No scratchpad notes."}
 
 3. Today's Google Calendar Events & Schedule:
 {cal_summary_str}
@@ -118,7 +118,9 @@ Formatting Guidelines:
      - List each Google Calendar event for today with interactive checkboxes: `- [ ] ⏰ 09:00 AM – 10:00 AM: Meeting Title ([Join Meet](url)) *(Account A)*` or `- [ ] 🗓️ All Day: Event Name`.
      - If there are no scheduled events, output: `*No scheduled calendar events today.*`
      ### 📋 Priorities & Tasks
-     - Carry over unfinished tasks with `- [ ]` and list top daily goals.
+     - CRITICAL: Review all items in "Yesterday's Scratchpad & Tomorrow's Ideas" and convert EVERY thought, errand, reminder, or idea into an actionable checklist task `- [ ]` (e.g., "Put on the agenda tomorrow to schedule my swim session" -> `- [ ] Schedule morning swim session`; "I also need to order groceries" -> `- [ ] Order groceries`).
+     - Also carry over any unfinished `- [ ]` tasks from the previous note.
+     - Ensure no task or idea from yesterday's scratchpad is lost or omitted. List all converted tasks as clear `- [ ]` items.
    - ## 🏋️ Workout: {workout.get('title')} (include the exact workout checklist, clickable diagram links, biometrics context, and desk worker posture cues).
    - ## 📊 Life Dashboard Pulse (compact table or bullets covering DroidZero, VM health, Gmail triage, Calendar sync status, and Market Watchlist).
    - ## 📝 Scratchpad & Tomorrow's Ideas (empty space for the user to jot notes during the day).
@@ -234,10 +236,10 @@ Formatting Guidelines:
             tasks_md.append("- [ ] 30-minute deep focus coding session")
 
         if scratch:
-            tasks_md.append("\n*Carried from yesterday's scratchpad:*")
-            for note in scratch[:3]:
-                clean_note = note.lstrip("-* ").strip()
-                tasks_md.append(f"- [ ] {clean_note}")
+            for note in scratch:
+                clean_note = note.lstrip("-* \t").strip()
+                if clean_note:
+                    tasks_md.append(f"- [ ] {clean_note}")
 
         cal_data = apis.get("calendar", {})
         cal_lines = cal_data.get("calendar_lines", [])

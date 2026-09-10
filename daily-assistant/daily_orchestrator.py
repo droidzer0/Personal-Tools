@@ -24,6 +24,19 @@ from modules.notifier import Notifier
 def run_orchestration(target_date: date, dry_run: bool = False, force: bool = False):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 Starting Daily Assistant Orchestrator for {target_date}...")
     
+    # 0. Sync and pull latest previous note from CouchDB if on OCI VM with livesync-cli
+    import shutil
+    import subprocess
+    from datetime import timedelta
+    if shutil.which("livesync-cli") and not dry_run:
+        try:
+            subprocess.run(["livesync-cli", "sync"], timeout=30, check=False)
+            yesterday_str = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
+            rel_path = f"Daily/{yesterday_str}.md"
+            subprocess.run(["livesync-cli", "pull", rel_path, f"/data/{rel_path}"], timeout=15, check=False)
+        except Exception as e:
+            print(f"    Notice: Pre-orchestration LiveSync pull encountered: {e}")
+
     # 1. Initialize modules
     parser = NoteParser(config.DAILY_DIR)
     workout_engine = WorkoutEngine(config.USER_PROFILE)
@@ -46,6 +59,7 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         print(f"    Found previous note: {prev_path.name}")
         prev_data = parser.parse_note_content(prev_path)
         print(f"    Carrying forward {len(prev_data['incomplete_tasks'])} incomplete tasks.")
+        print(f"    Converting {len(prev_data['scratchpad_notes'])} scratchpad items from yesterday into to-dos.")
     else:
         print("    No previous note found in rolling 14-day window. Initializing fresh start.")
         prev_data = {

@@ -86,7 +86,16 @@ class NoteParser:
 
             # Scratchpad bullets or lines
             elif in_scratchpad and trimmed and not trimmed.startswith("#") and not trimmed.startswith("---"):
-                scratchpad_notes.append(trimmed)
+                lower_line = trimmed.lower()
+                is_placeholder = (
+                    "capture thoughts" in lower_line or
+                    "use this space" in lower_line or
+                    lower_line in ("-", "*", "- [ ]", "*(none)*", "none")
+                )
+                if not is_placeholder:
+                    clean_text = re.sub(r'^[-*]\s*(\[\s*\]\s*)?', '', trimmed).strip()
+                    if clean_text:
+                        scratchpad_notes.append(clean_text)
 
             # Parse explicit actual weights logged (e.g., "Actual: 45 lbs x 10" or "`45 lbs x 10`")
             if in_workout and ("actual:" in trimmed.lower() or "logged:" in trimmed.lower()):
