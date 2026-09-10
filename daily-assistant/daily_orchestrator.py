@@ -135,15 +135,17 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         except Exception as e:
             print(f"    Notice: Could not auto-update Finance Dashboard table ({e})")
 
-    # 7. Sync to CouchDB (if on OCI VM with livesync-cli) before notifying
+    # 7. Push and Sync to CouchDB (if on OCI VM with livesync-cli) before notifying
     import shutil
     import subprocess
     if shutil.which("livesync-cli"):
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Syncing newly created note to CouchDB via livesync-cli...")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Pushing newly created note to CouchDB via livesync-cli...")
+            rel_path = f"Daily/{target_date.strftime('%Y-%m-%d')}.md"
+            subprocess.run(["livesync-cli", "push", f"/data/{rel_path}", rel_path], timeout=30, check=False)
             subprocess.run(["livesync-cli", "sync"], timeout=30, check=False)
         except Exception as e:
-            print(f"    Notice: livesync-cli sync prior to notification encountered: {e}")
+            print(f"    Notice: livesync-cli push/sync prior to notification encountered: {e}")
 
     # 8. Dispatch push notification via ntfy (if enabled)
     if config.NTFY_ENABLED and config.NTFY_TOPIC:
