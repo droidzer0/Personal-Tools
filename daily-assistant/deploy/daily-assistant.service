@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Assistant Note Generator
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/droidzero-stack/daily-assistant
+ExecStart=/bin/bash /opt/droidzero-stack/daily-assistant/deploy/run_daily.sh
+TimeoutStartSec=180

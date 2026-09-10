@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Daily Assistant every morning at 5:00 AM Central
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 America/Chicago
+Persistent=true
+Unit=daily-assistant.service
+
+[Install]
+WantedBy=timers.target
