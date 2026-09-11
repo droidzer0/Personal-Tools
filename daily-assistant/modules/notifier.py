@@ -99,6 +99,15 @@ class Notifier:
             if task_count > 0:
                 preview_parts.append(f"🎯 {task_count} to-do{'s' if task_count > 1 else ''}")
 
+        # 4. Priority email snippet
+        if api_data and "gmail" in api_data:
+            top_email = api_data["gmail"].get("top_email")
+            if top_email:
+                subj = top_email.get("subject", "")
+                if len(subj) > 28:
+                    subj = subj[:25] + "..."
+                preview_parts.append(f"📬 {subj}")
+
         if preview_parts:
             message = " | ".join(preview_parts) + "\nTap to open your daily note."
         else:

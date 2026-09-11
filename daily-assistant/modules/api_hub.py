@@ -3,6 +3,8 @@ import json
 import ssl
 import socket
 import datetime
+import html
+import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -186,6 +188,88 @@ class ApiHub:
 
         return weather
 
+    def get_daily_news(self) -> Dict[str, any]:
+        """
+        Fetches today's top news headlines from reliable RSS feeds:
+        - Chicago: WGN-TV Chicago (primary), NBC 5 Chicago (fallback)
+        - US: NPR News (primary), ABC News (fallback)
+        - World: BBC World News (primary), Al Jazeera English (fallback)
+        Returns structured dictionary with titles, sources, and links.
+        """
+        feeds = {
+            "chicago": [
+                ("https://wgntv.com/news/chicago-news/feed/", "WGN-TV Chicago"),
+                ("https://www.nbcchicago.com/?rss=y", "NBC 5 Chicago"),
+            ],
+            "us": [
+                ("https://feeds.npr.org/1001/rss.xml", "NPR News"),
+                ("https://abcnews.go.com/abcnews/usheadlines", "ABC News"),
+            ],
+            "world": [
+                ("https://feeds.bbci.co.uk/news/world/rss.xml", "BBC World News"),
+                ("https://www.aljazeera.com/xml/rss/all.xml", "Al Jazeera English"),
+            ]
+        }
+
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        }
+
+        news_results = {}
+
+        for category, sources in feeds.items():
+            item_found = False
+            for url, source_name in sources:
+                try:
+                    req = urllib.request.Request(url, headers=req_headers)
+                    with urllib.request.urlopen(req, timeout=7, context=self.ssl_ctx) as resp:
+                        content = resp.read()
+                        root = ET.fromstring(content)
+                        items = root.findall("./channel/item")
+                        if not items:
+                            items = root.findall(".//{http://www.w3.org/2005/Atom}entry")
+                        if items:
+                            top_item = items[0]
+                            title_elem = top_item.find("title")
+                            if title_elem is None:
+                                title_elem = top_item.find("{http://www.w3.org/2005/Atom}title")
+                            title_text = title_elem.text if title_elem is not None and title_elem.text else "Top stories"
+
+                            clean_title = html.unescape(title_text).strip()
+                            clean_title = clean_title.replace("<![CDATA[", "").replace("]]>", "").strip()
+                            for suffix in [f" - {source_name}", f" | {source_name}"]:
+                                if clean_title.endswith(suffix):
+                                    clean_title = clean_title[:-len(suffix)].strip()
+
+                            link_elem = top_item.find("link")
+                            if link_elem is None:
+                                link_elem = top_item.find("{http://www.w3.org/2005/Atom}link")
+                            link_url = ""
+                            if link_elem is not None:
+                                link_url = link_elem.text or link_elem.attrib.get("href", "")
+                            link_url = link_url.strip()
+
+                            news_results[category] = {
+                                "title": clean_title,
+                                "source": source_name,
+                                "link": link_url,
+                                "status": "OK"
+                            }
+                            item_found = True
+                            break
+                except Exception:
+                    continue
+
+            if not item_found:
+                news_results[category] = {
+                    "title": f"Top {category.capitalize()} news headlines",
+                    "source": "News Feed",
+                    "link": "",
+                    "status": "Unavailable"
+                }
+
+        return news_results
+
     def get_market_watchlist(self, tickers: List[str], target_date: Optional[datetime.date] = None) -> List[Dict[str, any]]:
         """
         Fetches market quotes with 🟢 Green / 🔴 Red indicator.
@@ -283,16 +367,18 @@ class ApiHub:
         except Exception as e:
             return None, str(e)[:35]
 
-    def get_gmail_triage(self) -> Dict[str, any]:
+    def get_gmail_triage(self, max_candidates: int = 5) -> Dict[str, any]:
         """
-        Reads Gmail unread counts using native HTTP REST requests.
-        Handles token refresh automatically and provides clear instructions if tokens are revoked/expired.
+        Reads Gmail unread counts and surfaces priority unread emails using native HTTP REST requests.
+        Scores candidate emails (prioritizing packages, bills, security alerts, and human messages over promo/newsletters).
         """
         triage = {
             "account_a_unread": 0,
             "account_b_unread": 0,
             "status": "Ready",
-            "action_required": ""
+            "action_required": "",
+            "candidates": [],
+            "top_email": None
         }
 
         token_1 = self.gmail_tokens_dir / "token_1.json"
@@ -303,10 +389,12 @@ class ApiHub:
             triage["action_required"] = "Run python3 reauth_google.py to authenticate"
             return triage
 
-        def query_account_unreads(token_file: Path) -> tuple:
+        all_candidates = []
+
+        def query_account(account_label: str, token_file: Path) -> tuple:
             access_token, err = self._get_access_token(token_file)
             if err:
-                return 0, err
+                return 0, [], err
 
             try:
                 api_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is:unread+label:INBOX&maxResults=50"
@@ -316,17 +404,79 @@ class ApiHub:
                 )
                 with urllib.request.urlopen(api_req, timeout=6, context=self.ssl_ctx) as api_resp:
                     api_data = json.loads(api_resp.read().decode())
-                    count = len(api_data.get("messages", []))
-                    return count, None
+                    messages = api_data.get("messages", [])
+                    total_count = len(messages)
+
+                account_candidates = []
+                for m in messages[:max_candidates]:
+                    m_id = m.get("id")
+                    if not m_id:
+                        continue
+                    m_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{m_id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date"
+                    m_req = urllib.request.Request(
+                        m_url,
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                    try:
+                        with urllib.request.urlopen(m_req, timeout=5, context=self.ssl_ctx) as m_resp:
+                            m_obj = json.loads(m_resp.read().decode())
+                            headers = {h.get("name", ""): h.get("value", "") for h in m_obj.get("payload", {}).get("headers", [])}
+                            subj = html.unescape(headers.get("Subject", "No Subject")).strip()
+                            sender = html.unescape(headers.get("From", "Unknown Sender")).strip()
+                            date_str = headers.get("Date", "").strip()
+                            snippet = html.unescape(m_obj.get("snippet", "")).strip()
+                            label_ids = m_obj.get("labelIds", [])
+
+                            score = 0
+                            if "IMPORTANT" in label_ids:
+                                score += 15
+
+                            combined = f"{subj.lower()} {sender.lower()} {snippet.lower()}"
+                            priority_keywords = [
+                                "package", "delivery", "delivered", "locker", "access code", "tracking",
+                                "payment", "due", "bill", "invoice", "statement", "receipt",
+                                "flight", "ticket", "boarding", "reservation", "booking", "itinerary",
+                                "security alert", "verification code", "two-factor", "password reset",
+                                "urgent", "action required", "reminder", "appointment", "doctor", "health"
+                            ]
+                            for kw in priority_keywords:
+                                if kw in combined:
+                                    score += 10
+                                    break
+
+                            marketing_keywords = [
+                                "unsubscribe", "newsletter", "weekly digest", "daily digest",
+                                "promo", "sale", "discount", "special offer", "save %", "off your next",
+                                "webinar", "podcast", "medium digest", "substack", "linkedin job",
+                                "marketing", "no-reply", "noreply"
+                            ]
+                            for kw in marketing_keywords:
+                                if kw in combined:
+                                    score -= 8
+
+                            account_candidates.append({
+                                "account": account_label,
+                                "id": m_id,
+                                "subject": subj,
+                                "sender": sender,
+                                "date": date_str,
+                                "snippet": snippet,
+                                "is_important": "IMPORTANT" in label_ids,
+                                "score": score
+                            })
+                    except Exception:
+                        continue
+
+                return total_count, account_candidates, None
             except urllib.error.HTTPError as he:
                 if he.code in (401, 403):
-                    return 0, "Insufficient permissions or expired token"
-                return 0, f"HTTP {he.code}"
+                    return 0, [], "Insufficient permissions or expired token"
+                return 0, [], f"HTTP {he.code}"
             except Exception as e:
-                return 0, str(e)[:30]
+                return 0, [], str(e)[:30]
 
-        count_1, err_1 = query_account_unreads(token_1)
-        count_2, err_2 = query_account_unreads(token_2)
+        count_1, cands_1, err_1 = query_account("Account A", token_1)
+        count_2, cands_2, err_2 = query_account("Account B", token_2)
 
         if err_1 == "Token expired (invalid_grant)" or err_2 == "Token expired (invalid_grant)":
             triage["status"] = "⚠️ Action Required: Re-auth needed (`python3 reauth_google.py`)"
@@ -337,6 +487,25 @@ class ApiHub:
             triage["account_a_unread"] = count_1
             triage["account_b_unread"] = count_2
             triage["status"] = f"🟢 Account A: {count_1} unread • Account B: {count_2} unread"
+
+        all_candidates.extend(cands_1)
+        all_candidates.extend(cands_2)
+
+        all_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+        triage["candidates"] = all_candidates
+
+        if all_candidates:
+            top = all_candidates[0]
+            summary = top["snippet"]
+            if len(summary) > 220:
+                summary = summary[:217] + "..."
+            triage["top_email"] = {
+                "account": top["account"],
+                "sender": top["sender"],
+                "subject": top["subject"],
+                "snippet": top["snippet"],
+                "summary": summary
+            }
 
         return triage
 

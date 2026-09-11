@@ -75,6 +75,34 @@ class GeminiClient:
         cal_summary_str = '\n'.join(cal_lines) if cal_lines else "No scheduled calendar events today."
         markets_str = ', '.join(q.get('display', '') for q in apis.get('markets', []))
 
+        # Quote of the day
+        quote_data = apis.get('quote', {})
+        quote_text = quote_data.get('quote', 'We are what we repeatedly do. Excellence, then, is not an act, but a habit.')
+        quote_author = quote_data.get('author', 'Will Durant')
+        quote_theme = quote_data.get('theme', 'Habit & Consistency')
+
+        # Real news headlines
+        news = apis.get('news', {})
+        chicago_n = news.get('chicago', {})
+        us_n = news.get('us', {})
+        world_n = news.get('world', {})
+        news_lines = [
+            f"- 🏙️ **Chicago**: [{chicago_n.get('title', 'Local news')}]({chicago_n.get('link', '#')}) *({chicago_n.get('source', 'WGN-TV')})*",
+            f"- 🇺🇸 **US**: [{us_n.get('title', 'National news')}]({us_n.get('link', '#')}) *({us_n.get('source', 'NPR')})*",
+            f"- 🌍 **World**: [{world_n.get('title', 'World news')}]({world_n.get('link', '#')}) *({world_n.get('source', 'BBC News')})*"
+        ]
+        news_summary_str = "\n".join(news_lines)
+
+        # Gmail unread candidates and triage
+        gmail_data = apis.get('gmail', {})
+        candidates = gmail_data.get('candidates', [])
+        email_candidates_lines = []
+        for idx, cand in enumerate(candidates[:5], 1):
+            email_candidates_lines.append(
+                f"- Candidate {idx} [{cand.get('account', 'Gmail')}]: From: {cand.get('sender')} | Subject: \"{cand.get('subject')}\" | Snippet: \"{cand.get('snippet')}\" | Important: {cand.get('is_important')}"
+            )
+        email_candidates_str = "\n".join(email_candidates_lines) if email_candidates_lines else "No unread emails in inboxes."
+
         is_workout_skipped = workout.get("skipped", False)
         if is_workout_skipped:
             workout_section_input = "4. Workout Status: USER IS SKIPPING WORKOUT TODAY (explicitly requested in yesterday's scratchpad). DO NOT GENERATE ANY WORKOUT SECTION."
@@ -118,12 +146,25 @@ Input Data:
 
 6. System Health Alerts / Incidents Requiring Action:
 {chr(10).join(f"- 🚨 {inc}" for inc in (system_incidents or [])) if system_incidents else "All systems fully operational."}
+
+7. Today's Reflection Quote:
+"{quote_text}" — {quote_author} (Theme: {quote_theme})
+
+8. Today's Real News Headlines:
+{news_summary_str}
+
+9. Unread Inbound Email Candidates & Triage:
+{email_candidates_str}
 ---
 
 Formatting Guidelines:
 1. Output valid Markdown only. Start with Obsidian YAML frontmatter (date, tags: [daily-note], type: daily-note).
 2. Create clear, motivating sections:
-   - Header with Chicago weather and quick system pulse.
+   - Header with Date: '# 📅 {weekday_name}, {today_str}'.
+   - Daily Reflection Quote: Directly under the header, place the daily reflection quote in a blockquote:
+     > 💭 *"{quote_text}"*
+     > — **{quote_author}**
+   - Weather and system pulse summary line directly below the quote.
    - ## 🎯 To-do
      Must contain two clearly organized subsections:
      ### 📅 Today's Schedule
@@ -132,9 +173,21 @@ Formatting Guidelines:
      ### 📋 Priorities & Tasks
      - CRITICAL - SYSTEM OUTAGES & WARNINGS: If any system is down, degraded, or requires reauthorization (listed in "System Health Alerts / Incidents"), you MUST create an urgent checklist task `- [ ] ⚠️` at the TOP of Priorities & Tasks to investigate and fix it (e.g. `- [ ] ⚠️ Reauthorize Google Calendar API: Run python3 reauth_google.py in terminal`; `- [ ] 🚨 Investigate DroidZero downtime`).
      - Convert EVERY thought, errand, reminder, or idea from "Yesterday's Scratchpad & Tomorrow's Ideas" into an actionable checklist task `- [ ]` (e.g., "Put on the agenda tomorrow to schedule my swim session" -> `- [ ] Schedule morning swim session`; "I also need to order groceries" -> `- [ ] Order groceries`).
+     - ACTION FROM PRIORITY EMAIL: If the priority email requires an action (e.g. paying a bill, retrieving a package with access code, confirming travel, or replying to an urgent request), ALSO create an actionable checklist item `- [ ]` here (e.g. `- [ ] 📦 Retrieve Luxer One package from locker (Code: 382491)`).
      - Also carry over any unfinished `- [ ]` tasks from the previous note.
      - Ensure no task, idea, or system alert is lost or omitted. List all converted tasks as clear `- [ ]` items.
+   - ## 📬 Priority Email Spotlight
+     Review the unread email candidates. Identify the single most important or urgent email (favoring actionable human correspondence, bills, deliveries, travel, or account security alerts over automated marketing/newsletters).
+     Format as:
+     > **Account**: [Account A or B] • **From**: [Sender Name / Email]
+     > **Subject**: [Subject Line]
+     > **Summary**: [2-3 concise sentences detailing what the email is, key dates/numbers/codes, and why it matters].
+     If all inboxes are caught up (zero unread), output:
+     > *All inboxes clear. Zero unread priority emails requiring attention.*
    {workout_format_instruction}
+   - ## 📰 Daily News Briefing
+     Present today's authentic news headlines with clickable links:
+{news_summary_str}
    - ## 📊 Life Dashboard Pulse (compact table or bullets covering DroidZero, VM health, Gmail triage, Calendar sync status, and Market Watchlist).
    - ## 📝 Scratchpad & Tomorrow's Ideas (empty space for the user to jot notes during the day).
 3. Ensure all workout items (if workout is active today) have interactive checkboxes: `- [ ] [**Exercise Name**](URL) ↗ — target` and an indented line `  - Actual: `___ lbs x ___ reps`` for mobile logging.
@@ -261,6 +314,17 @@ Formatting Guidelines:
                 if clean_note:
                     tasks_md.append(f"- [ ] {clean_note}")
 
+        # Check for actionable priority email
+        gmail_data = apis.get("gmail", {})
+        top_email = gmail_data.get("top_email")
+        if top_email:
+            subj = top_email.get("subject", "").lower()
+            snd = top_email.get("sender", "").lower()
+            if "luxer" in snd or "package" in subj:
+                tasks_md.append(f"- [ ] 📦 Retrieve package: {top_email.get('subject')}")
+            elif "payment" in subj or "due" in subj or "bill" in subj:
+                tasks_md.append(f"- [ ] 💳 Action needed: {top_email.get('subject')}")
+
         cal_data = apis.get("calendar", {})
         cal_lines = cal_data.get("calendar_lines", [])
 
@@ -272,6 +336,27 @@ Formatting Guidelines:
 
         todo_blocks.append("\n### 📋 Priorities & Tasks")
         todo_blocks.extend(tasks_md)
+
+        # Quote of the day
+        quote_data = apis.get("quote", {})
+        if quote_data and "quote" in quote_data:
+            quote_md = f'> 💭 *"{quote_data["quote"]}"*\n> — **{quote_data.get("author", "Unknown")}**'
+        else:
+            quote_md = '> 💭 *"We are what we repeatedly do. Excellence, then, is not an act, but a habit."*\n> — **Will Durant**'
+
+        # Priority Email Spotlight
+        if top_email:
+            priority_email_md = f"""---
+
+## 📬 Priority Email Spotlight
+> **Account**: {top_email.get('account', 'Gmail')} • **From**: {top_email.get('sender', 'Unknown')}
+> **Subject**: {top_email.get('subject', 'No Subject')}
+> **Summary**: {top_email.get('summary', '')}"""
+        else:
+            priority_email_md = """---
+
+## 📬 Priority Email Spotlight
+> *All inboxes clear. Zero unread priority emails requiring attention.*"""
 
         is_workout_skipped = workout.get("skipped", False)
         if is_workout_skipped:
@@ -296,6 +381,32 @@ Formatting Guidelines:
 > **Desk Worker Posture Cue:** {workout.get('desk_mobility')}
 """
 
+        # News Briefing
+        news = apis.get("news", {})
+        chicago_n = news.get("chicago", {})
+        us_n = news.get("us", {})
+        world_n = news.get("world", {})
+        news_lines = []
+        if chicago_n.get("link"):
+            news_lines.append(f"- 🏙️ **Chicago**: [{chicago_n.get('title', 'Local news')}]({chicago_n.get('link')}) *({chicago_n.get('source', 'WGN-TV')})*")
+        else:
+            news_lines.append(f"- 🏙️ **Chicago**: {chicago_n.get('title', 'Local news unavailable')}")
+
+        if us_n.get("link"):
+            news_lines.append(f"- 🇺🇸 **US**: [{us_n.get('title', 'National news')}]({us_n.get('link')}) *({us_n.get('source', 'NPR')})*")
+        else:
+            news_lines.append(f"- 🇺🇸 **US**: {us_n.get('title', 'National news unavailable')}")
+
+        if world_n.get("link"):
+            news_lines.append(f"- 🌍 **World**: [{world_n.get('title', 'World news')}]({world_n.get('link')}) *({world_n.get('source', 'BBC News')})*")
+        else:
+            news_lines.append(f"- 🌍 **World**: {world_n.get('title', 'World news unavailable')}")
+
+        news_section_md = f"""---
+
+## 📰 Daily News Briefing
+{chr(10).join(news_lines)}"""
+
         market_lines = " • ".join(q.get("display", "") for q in apis.get("markets", []))
 
         return f"""---
@@ -308,6 +419,8 @@ type: daily-note
 
 # 📅 Daily Plan: {weekday_name}, {today_str}
 
+{quote_md}
+
 > 🌤️ **Chicago Weather:** {apis.get('weather', {}).get('summary', 'Chicago, IL')}
 > 🌐 **DroidZero:** {apis.get('website', {}).get('message', 'Online')} • **VM Load:** `{apis.get('instance', {}).get('load_avg', 'N/A')}`
 
@@ -316,7 +429,10 @@ type: daily-note
 ## 🎯 To-do
 
 {chr(10).join(todo_blocks)}
+{priority_email_md}
 {workout_section_md}
+{news_section_md}
+
 ---
 
 ## 📊 Life Dashboard Pulse

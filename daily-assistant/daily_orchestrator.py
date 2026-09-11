@@ -20,6 +20,7 @@ from modules.workout_engine import WorkoutEngine
 from modules.api_hub import ApiHub
 from modules.gemini_client import GeminiClient
 from modules.notifier import Notifier
+from modules.quotes import get_daily_quote
 
 def run_orchestration(target_date: date, dry_run: bool = False, force: bool = False):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 Starting Daily Assistant Orchestrator for {target_date}...")
@@ -116,6 +117,12 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     weather = api_hub.get_chicago_weather()
     print(f"    Chicago Weather: {weather['summary']}")
 
+    daily_quote = get_daily_quote(target_date)
+    print(f"    Daily Quote: \"{daily_quote['quote'][:45]}...\" ({daily_quote['author']})")
+
+    news_data = api_hub.get_daily_news()
+    print(f"    News: Chicago: {news_data.get('chicago', {}).get('title', '')[:30]}... | US: {news_data.get('us', {}).get('title', '')[:30]}...")
+
     markets = api_hub.get_market_watchlist(config.TRACKED_TICKERS, target_date)
     if target_date.weekday() >= 5:
         print("    Markets: Weekend detected (markets closed).")
@@ -124,6 +131,9 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
 
     gmail_triage = api_hub.get_gmail_triage()
     print(f"    Gmail Triage: {gmail_triage['status']}")
+    if gmail_triage.get("top_email"):
+        top_e = gmail_triage["top_email"]
+        print(f"    📬 Priority Email: \"{top_e.get('subject')}\" from {top_e.get('sender')}")
 
     calendar_data = {"events": [], "calendar_lines": [], "count": 0, "status": "Disabled"}
     if config.GOOGLE_CALENDAR_ENABLED:
@@ -140,7 +150,9 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         "weather": weather,
         "markets": markets,
         "gmail": gmail_triage,
-        "calendar": calendar_data
+        "calendar": calendar_data,
+        "news": news_data,
+        "quote": daily_quote
     }
 
     # Extract any down systems or warnings to convert into investigation to-dos
