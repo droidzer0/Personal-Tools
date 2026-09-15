@@ -7,8 +7,9 @@ import html
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
+import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 def get_ssl_context():
     """Returns an SSL context that works reliably across macOS and Linux environments."""
@@ -509,6 +510,194 @@ class ApiHub:
 
         return triage
 
+    def _parse_ics_feed(
+        self,
+        ics_text: str,
+        target_date: datetime.date,
+        default_tz: any
+    ) -> Tuple[List[Dict[str, any]], str]:
+        """
+        Parses an iCalendar (.ics) feed (e.g. iCloud, Apple Calendar, Outlook) according to RFC 5545.
+        Handles line unfolding, DTSTART/DTEND (timed vs all-day), timezones, and basic RRULE recurrence.
+        """
+        events: List[Dict[str, any]] = []
+        if not ics_text:
+            return events, "iCloud"
+
+        # 1. RFC 5545 Line Unfolding: Remove CRLF followed by space or tab
+        unfolded = re.sub(r'\r?\n[ \t]', '', ics_text)
+
+        # 2. Extract Calendar Name
+        cal_name_match = re.search(r'^X-WR-CALNAME:(.+)$', unfolded, re.MULTILINE)
+        cal_name = cal_name_match.group(1).strip() if cal_name_match else "iCloud"
+
+        # Fallback timezone if default_tz is None
+        if not default_tz:
+            try:
+                from zoneinfo import ZoneInfo
+                default_tz = ZoneInfo("America/Chicago")
+            except Exception:
+                default_tz = datetime.timezone(datetime.timedelta(hours=-5))
+
+        def parse_ics_dt(dt_line: str) -> Tuple[Optional[datetime.datetime], bool]:
+            parts = dt_line.split(":", 1)
+            if len(parts) != 2:
+                return None, False
+            params_part, val = parts[0], parts[1].strip()
+            is_date_only = "VALUE=DATE" in params_part or len(val) == 8
+
+            if is_date_only:
+                try:
+                    d = datetime.date(int(val[:4]), int(val[4:6]), int(val[6:8]))
+                    dt = datetime.datetime.combine(d, datetime.time.min).replace(tzinfo=default_tz)
+                    return dt, True
+                except Exception:
+                    return None, True
+
+            # Timed event
+            tz = default_tz
+            if "TZID=" in params_part:
+                tz_str = params_part.split("TZID=")[1].split(";")[0].strip()
+                try:
+                    from zoneinfo import ZoneInfo
+                    tz = ZoneInfo(tz_str)
+                except Exception:
+                    if "GMT" in tz_str:
+                        m = re.match(r'GMT([+-]\d{2})(\d{2})?', tz_str)
+                        if m:
+                            hours = int(m.group(1))
+                            mins = int(m.group(2) or 0)
+                            tz = datetime.timezone(datetime.timedelta(hours=hours, minutes=mins))
+
+            if val.endswith("Z"):
+                try:
+                    val_clean = val[:-1]
+                    dt_utc = datetime.datetime.strptime(val_clean, "%Y%m%dT%H%M%S").replace(tzinfo=datetime.timezone.utc)
+                    return dt_utc.astimezone(default_tz), False
+                except Exception:
+                    return None, False
+            else:
+                try:
+                    naive = datetime.datetime.strptime(val, "%Y%m%dT%H%M%S")
+                    return naive.replace(tzinfo=tz).astimezone(default_tz), False
+                except Exception:
+                    return None, False
+
+        vevents = unfolded.split("BEGIN:VEVENT")
+        for block in vevents[1:]:
+            if "END:VEVENT" not in block:
+                continue
+            body = block.split("END:VEVENT")[0]
+
+            summary = "iCloud Event"
+            location = ""
+            status = ""
+            dtstart_line = ""
+            dtend_line = ""
+            rrule_line = ""
+            url_line = ""
+
+            for line in body.splitlines():
+                line = line.strip()
+                if line.startswith("SUMMARY"):
+                    summary = line.split(":", 1)[-1].replace(r"\,", ",").replace(r"\;", ";").replace(r"\\", "\\").strip()
+                elif line.startswith("LOCATION"):
+                    location = line.split(":", 1)[-1].replace(r"\,", ",").replace(r"\n", " ").replace(r"\\", "\\").strip()
+                elif line.startswith("STATUS"):
+                    status = line.split(":", 1)[-1].strip().upper()
+                elif line.startswith("DTSTART"):
+                    dtstart_line = line
+                elif line.startswith("DTEND"):
+                    dtend_line = line
+                elif line.startswith("RRULE:"):
+                    rrule_line = line[6:].strip()
+                elif line.startswith("URL"):
+                    url_line = line.split(":", 1)[-1].strip()
+
+            if status == "CANCELLED":
+                continue
+
+            start_dt, is_all_day = parse_ics_dt(dtstart_line) if dtstart_line else (None, False)
+            if not start_dt:
+                continue
+
+            end_dt = None
+            if dtend_line:
+                end_dt, _ = parse_ics_dt(dtend_line)
+
+            matches = False
+            if is_all_day:
+                s_date = start_dt.date()
+                e_date = end_dt.date() if end_dt else s_date + datetime.timedelta(days=1)
+                if s_date <= target_date < e_date:
+                    matches = True
+            else:
+                if start_dt.date() == target_date:
+                    matches = True
+
+            # Handle recurrence (RRULE) if not matched directly
+            if not matches and rrule_line:
+                r_parts = dict(part.split("=", 1) for part in rrule_line.split(";") if "=" in part)
+                freq = r_parts.get("FREQ")
+                until_str = r_parts.get("UNTIL")
+                until_dt = None
+                if until_str:
+                    until_dt, _ = parse_ics_dt("DT:" + until_str)
+
+                if not until_dt or target_date <= until_dt.date():
+                    if freq == "YEARLY":
+                        if start_dt.month == target_date.month and start_dt.day == target_date.day:
+                            matches = True
+                    elif freq == "DAILY":
+                        interval = int(r_parts.get("INTERVAL", 1))
+                        diff_days = (target_date - start_dt.date()).days
+                        if diff_days >= 0 and diff_days % interval == 0:
+                            matches = True
+                    elif freq == "WEEKLY":
+                        byday = r_parts.get("BYDAY", "")
+                        interval = int(r_parts.get("INTERVAL", 1))
+                        diff_weeks = (target_date - start_dt.date()).days // 7
+                        day_abbr = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"][target_date.weekday()]
+                        if diff_weeks >= 0 and (diff_weeks % interval == 0):
+                            if not byday or day_abbr in byday.split(","):
+                                matches = True
+
+            if matches:
+                if is_all_day:
+                    time_display = "All Day"
+                    sort_key = 0
+                else:
+                    start_fmt = start_dt.strftime("%I:%M %p").lstrip("0")
+                    if end_dt:
+                        end_fmt = end_dt.strftime("%I:%M %p").lstrip("0")
+                        time_display = f"{start_fmt} – {end_fmt}"
+                    else:
+                        time_display = start_fmt
+                    sort_key = start_dt.timestamp()
+
+                # Extract meeting URL if present
+                meet_link = ""
+                for candidate in [url_line, location]:
+                    m = re.search(r'(https?://[^\s]+)', candidate)
+                    if m:
+                        candidate_url = m.group(1)
+                        if any(domain in candidate_url.lower() for domain in ["meet.google", "zoom.us", "teams.microsoft", "webex", "facetime.apple"]):
+                            meet_link = candidate_url
+                            break
+
+                events.append({
+                    "summary": summary,
+                    "time_display": time_display,
+                    "is_all_day": is_all_day,
+                    "sort_key": sort_key,
+                    "account": "iCloud",
+                    "calendar": cal_name,
+                    "meet_link": meet_link,
+                    "location": location
+                })
+
+        return events, cal_name
+
     def get_calendar_events(
         self,
         target_date: datetime.date,
@@ -667,40 +856,23 @@ class ApiHub:
                 except Exception:
                     continue
 
-        # 3. Optional external iCal (.ics) feeds
+        # 3. External iCal (.ics / webcal) feeds (e.g. iCloud Calendar)
         if ics_urls:
             for ics_url in ics_urls:
-                if not ics_url or not ics_url.startswith("http"):
+                if not ics_url:
+                    continue
+                if ics_url.startswith("webcal://"):
+                    ics_url = "https://" + ics_url[9:]
+                if not ics_url.startswith("http://") and not ics_url.startswith("https://"):
                     continue
                 try:
                     ics_req = urllib.request.Request(ics_url, headers={"User-Agent": "DailyAssistant/1.0"})
-                    with urllib.request.urlopen(ics_req, timeout=6, context=self.ssl_ctx) as ics_resp:
+                    with urllib.request.urlopen(ics_req, timeout=8, context=self.ssl_ctx) as ics_resp:
                         ics_text = ics_resp.read().decode("utf-8", errors="ignore")
-                        # Parse simple VEVENTs
-                        vevents = ics_text.split("BEGIN:VEVENT")
-                        for block in vevents[1:]:
-                            if "END:VEVENT" not in block:
-                                continue
-                            ev_body = block.split("END:VEVENT")[0]
-                            ev_summary = "External Event"
-                            ev_date = ""
-                            for l in ev_body.splitlines():
-                                if l.startswith("SUMMARY:"):
-                                    ev_summary = l[8:].strip()
-                                elif l.startswith("DTSTART"):
-                                    val = l.split(":")[-1].strip()
-                                    ev_date = val[:8]  # YYYYMMDD
-                            if ev_date == target_date.strftime("%Y%m%d"):
-                                all_events.append({
-                                    "summary": ev_summary,
-                                    "time_display": "All Day",
-                                    "is_all_day": True,
-                                    "sort_key": 0,
-                                    "account": "iCal Feed",
-                                    "calendar": "External",
-                                    "meet_link": "",
-                                    "location": ""
-                                })
+                        ics_events, cal_title = self._parse_ics_feed(ics_text, target_date, tz)
+                        all_events.extend(ics_events)
+                        if "iCloud" not in result["accounts_polled"]:
+                            result["accounts_polled"].append("iCloud")
                 except Exception:
                     pass
 
@@ -720,7 +892,7 @@ class ApiHub:
         calendar_lines = []
         for ev in deduped:
             meet_part = f" ([Join Meet]({ev['meet_link']}))" if ev["meet_link"] else ""
-            acc_tag = f" *({ev['account']})*" if len(result["accounts_polled"]) > 1 else ""
+            acc_tag = f" *({ev['account']})*" if (len(result["accounts_polled"]) > 1 or ev["account"] == "iCloud") else ""
 
             if ev["is_all_day"]:
                 line = f"- [ ] 🗓️ **All Day**: {ev['summary']}{acc_tag}"

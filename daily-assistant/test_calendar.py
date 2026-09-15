@@ -116,7 +116,76 @@ def test_deterministic_generation_with_calendar():
     assert "📅 Google Calendar" in result, "Must show Google Calendar in Life Dashboard pulse"
     print("✅ Deterministic note generation test passed successfully!")
 
+def test_parse_ics_feed():
+    print("Testing ApiHub._parse_ics_feed iCloud integration...")
+    from modules.api_hub import ApiHub
+    from zoneinfo import ZoneInfo
+    hub = ApiHub(droidzero_url="", gmail_creds_path=Path("."), gmail_tokens_dir=Path("."))
+
+    sample_ics = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Apple Inc.//Mac OS X 10.15.7//EN
+X-WR-CALNAME:Home
+BEGIN:VEVENT
+UID:event-1
+SUMMARY:Lap Swim
+DTSTART;TZID=America/Chicago:20260915T070000
+DTEND;TZID=America/Chicago:20260915T073000
+LOCATION:FFC - West Loop
+END:VEVENT
+BEGIN:VEVENT
+UID:event-2
+SUMMARY:Happy Hour with
+  Team
+DTSTART;TZID=America/Chicago:20260915T170000
+DTEND;TZID=America/Chicago:20260915T180000
+LOCATION:Bar Siena
+END:VEVENT
+BEGIN:VEVENT
+UID:event-3
+SUMMARY:Old Cancelled Meeting
+STATUS:CANCELLED
+DTSTART;TZID=America/Chicago:20260915T120000
+DTEND;TZID=America/Chicago:20260915T130000
+END:VEVENT
+BEGIN:VEVENT
+UID:event-4
+SUMMARY:Annual Review
+RRULE:FREQ=YEARLY
+DTSTART;VALUE=DATE:20200915
+DTEND;VALUE=DATE:20200916
+END:VEVENT
+BEGIN:VEVENT
+UID:event-5
+SUMMARY:Tomorrow Meeting
+DTSTART;TZID=America/Chicago:20260916T090000
+DTEND;TZID=America/Chicago:20260916T100000
+END:VEVENT
+END:VCALENDAR"""
+
+    target = date(2026, 9, 15)
+    tz = ZoneInfo("America/Chicago")
+    events, cal_name = hub._parse_ics_feed(sample_ics, target, tz)
+
+    assert cal_name == "Home", f"Expected 'Home', got '{cal_name}'"
+    assert len(events) == 3, f"Expected 3 events (2 timed + 1 yearly recurrence), got {len(events)}"
+
+    summaries = [e["summary"] for e in events]
+    assert "Lap Swim" in summaries, "Missing Lap Swim"
+    assert "Happy Hour with Team" in summaries, "Failed line unfolding on Happy Hour"
+    assert "Annual Review" in summaries, "Missing annual recurrence event"
+    assert "Old Cancelled Meeting" not in summaries, "Cancelled event was not filtered"
+    assert "Tomorrow Meeting" not in summaries, "Tomorrow's event incorrectly matched"
+
+    lap_swim = next(e for e in events if e["summary"] == "Lap Swim")
+    assert lap_swim["time_display"] == "7:00 AM – 7:30 AM"
+    assert lap_swim["account"] == "iCloud"
+    assert lap_swim["calendar"] == "Home"
+    print("✅ ApiHub._parse_ics_feed tests passed successfully!")
+
 if __name__ == "__main__":
     test_note_parser_rollover()
     test_deterministic_generation_with_calendar()
+    test_parse_ics_feed()
     print("\n🎉 All tests passed!")
+

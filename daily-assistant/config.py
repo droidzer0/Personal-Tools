@@ -62,7 +62,14 @@ GMAIL_TOKENS_DIR = GOOGLE_TOKENS_DIR
 # Google Calendar & Timezone Configuration
 GOOGLE_CALENDAR_ENABLED = os.getenv("GOOGLE_CALENDAR_ENABLED", "true").lower() in ("true", "1", "yes")
 CALENDAR_TIMEZONE = os.getenv("CALENDAR_TIMEZONE", "America/Chicago")
-CALENDAR_ICS_URLS = [url.strip() for url in os.getenv("CALENDAR_ICS_URLS", "").split(",") if url.strip()]
+
+def _normalize_ics_url(url: str) -> str:
+    url = url.strip()
+    if url.startswith("webcal://"):
+        return "https://" + url[9:]
+    return url
+
+CALENDAR_ICS_URLS = [_normalize_ics_url(u) for u in os.getenv("CALENDAR_ICS_URLS", "").split(",") if u.strip()]
 
 # Financial Market Trackers
 DEFAULT_TICKERS = ["VOO", "VTI", "VT", "QQQ", "IGV", "NOW", "BTC-USD", "ETH-USD"]
