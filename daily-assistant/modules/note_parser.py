@@ -119,7 +119,8 @@ class NoteParser:
                     "all day" in task_text.lower() or
                     bool(re.search(r'\b\d{1,2}:\d{2}\s*(?:am|pm)\b', task_text, re.IGNORECASE))
                 )
-                if not in_workout and not is_calendar_event:
+                recurring_hygiene = any(h in task_text.lower() for h in ["brush teeth", "wash face", "floss"])
+                if not in_workout and not is_calendar_event and not recurring_hygiene:
                     incomplete_tasks.append(task_text)
                 elif in_workout:
                     current_exercise = self._extract_exercise_name(task_text)
@@ -491,3 +492,53 @@ class NoteParser:
             health_file_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
         return announcements
+
+    def load_working_weights(self, health_file_path: Path) -> Dict[str, Dict[str, str]]:
+        """
+        Parses the Personal Bests & Working Lifts table from Health & Fitness.md.
+        Returns a dict mapping exercise name to its current working weight, PB, and target goal.
+        """
+        if not health_file_path.exists():
+            return {}
+
+        content = health_file_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+
+        table_start_idx = -1
+        table_header_idx = -1
+        for i, line in enumerate(lines):
+            if "Personal Bests & Working Lifts" in line:
+                table_start_idx = i
+                break
+
+        if table_start_idx == -1:
+            return {}
+
+        for i in range(table_start_idx, len(lines)):
+            if lines[i].strip().startswith("|") and "Exercise" in lines[i]:
+                table_header_idx = i
+                break
+
+        if table_header_idx == -1:
+            return {}
+
+        weights = {}
+        for i in range(table_header_idx + 2, len(lines)):
+            line = lines[i].strip()
+            if not line.startswith("|"):
+                break
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 6:
+                clean_name = parts[1].strip().strip("*").strip()
+                working = parts[2].strip()
+                pb = parts[3].strip()
+                target_goal = parts[4].strip()
+                date_achieved = parts[5].strip()
+                weights[clean_name] = {
+                    "working": working,
+                    "pb": pb,
+                    "goal": target_goal,
+                    "date": date_achieved
+                }
+
+        return weights

@@ -1,5 +1,5 @@
 from datetime import date
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 
 class WorkoutEngine:
     def __init__(self, profile: Dict[str, any]):
@@ -11,9 +11,15 @@ class WorkoutEngine:
             return 0.0
         return round((weight_lbs * 703) / (height_in ** 2), 1)
 
-    def get_today_routine(self, target_date: date) -> Dict[str, any]:
+    def get_today_routine(
+        self,
+        target_date: date,
+        timeline: Optional[Dict[str, int]] = None,
+        working_weights: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, any]:
         """
-        Determines the optimal routine based on day of week and Square 1 On-Ramp protocol.
+        Determines the optimal routine based on day of week, Square 1 On-Ramp protocol,
+        and deterministic program timeline (Week & Day).
         Weekday indices: Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6
         """
         weekday = target_date.weekday()
@@ -219,17 +225,30 @@ class WorkoutEngine:
             }
         }
 
-        routine = routines.get(weekday, routines[0])
+        routine = dict(routines.get(weekday, routines[0]))
+        # Deep copy exercises so modifications don't persist across calls
+        routine["exercises"] = [dict(ex) for ex in routine["exercises"]]
         routine["current_bmi"] = current_bmi
         routine["target_weight"] = self.profile["target_weight_lbs"]
         routine["weight_to_lose"] = round(self.profile["current_weight_lbs"] - 167.5, 1)
+
+        # Attach timeline context
+        week = timeline.get("week", 1) if timeline else 1
+        day = timeline.get("day", weekday + 1) if timeline else weekday + 1
+        routine["program_week"] = week
+        routine["program_day"] = day
+        routine["cycle_display"] = f"Week {week}, Day {day}"
+
+        # Attach working weights context
+        routine["working_weights"] = working_weights or {}
 
         return routine
 
     def format_workout_markdown(self, routine: Dict[str, any]) -> str:
         """Formats the routine as an interactive Obsidian markdown checklist with diagram links."""
+        cycle_str = f" ({routine['cycle_display']})" if routine.get("cycle_display") else ""
         md = []
-        md.append(f"## 🏋️ Workout: {routine['title']}")
+        md.append(f"## 🏋️ Workout{cycle_str}: {routine['title']}")
         md.append(f"> **Focus:** {routine['goal']}")
         md.append(f"> **Biometrics Context:** Current BMI: `{routine['current_bmi']}` • Target: `165-170 lbs` (`-{routine['weight_to_lose']} lbs` remaining)\n")
 

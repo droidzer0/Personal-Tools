@@ -5,7 +5,7 @@ import time
 import urllib.request
 import urllib.error
 from datetime import date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 def get_ssl_context():
     try:
@@ -33,7 +33,10 @@ class GeminiClient:
         previous_note_data: Dict[str, any],
         workout_data: Dict[str, any],
         api_data: Dict[str, any],
-        system_incidents: Optional[List[str]] = None
+        system_incidents: Optional[List[str]] = None,
+        timeline: Optional[Dict[str, int]] = None,
+        working_weights: Optional[Dict[str, Any]] = None,
+        mandatory_tasks: Optional[List[str]] = None
     ) -> str:
         """
         Calls Gemini to format and synthesize the daily note.
@@ -45,7 +48,10 @@ class GeminiClient:
         if self.api_key:
             # 1. Try direct REST API first (zero external pip packages required)
             try:
-                text = self._call_gemini_rest_api(today_str, weekday_name, previous_note_data, workout_data, api_data, system_incidents)
+                text = self._call_gemini_rest_api(
+                    today_str, weekday_name, previous_note_data, workout_data, api_data,
+                    system_incidents, timeline, working_weights, mandatory_tasks
+                )
                 if text:
                     return text
             except Exception as e:
@@ -53,13 +59,19 @@ class GeminiClient:
 
             # 2. Try SDK if installed
             try:
-                text = self._call_gemini_sdk(today_str, weekday_name, previous_note_data, workout_data, api_data, system_incidents)
+                text = self._call_gemini_sdk(
+                    today_str, weekday_name, previous_note_data, workout_data, api_data,
+                    system_incidents, timeline, working_weights, mandatory_tasks
+                )
                 if text:
                     return text
             except Exception as e:
                 print(f"[GeminiClient] SDK invocation error ({e}); using deterministic generation.")
 
-        return self._deterministic_generation(today_str, weekday_name, previous_note_data, workout_data, api_data, system_incidents)
+        return self._deterministic_generation(
+            today_str, weekday_name, previous_note_data, workout_data, api_data,
+            system_incidents, timeline, working_weights, mandatory_tasks
+        )
 
     def _build_prompt(
         self,
@@ -68,12 +80,20 @@ class GeminiClient:
         prev: Dict[str, any],
         workout: Dict[str, any],
         apis: Dict[str, any],
-        system_incidents: Optional[List[str]] = None
+        system_incidents: Optional[List[str]] = None,
+        timeline: Optional[Dict[str, int]] = None,
+        working_weights: Optional[Dict[str, Any]] = None,
+        mandatory_tasks: Optional[List[str]] = None
     ) -> str:
         cal_data = apis.get('calendar', {})
         cal_lines = cal_data.get('calendar_lines', [])
         cal_summary_str = '\n'.join(cal_lines) if cal_lines else "No scheduled calendar events today."
         markets_str = ', '.join(q.get('display', '') for q in apis.get('markets', []))
+
+        # Program timeline
+        week = timeline.get("week", 1) if timeline else 1
+        day = timeline.get("day", 1) if timeline else 1
+        cycle_str = f"Week {week}, Day {day}"
 
         # Quote of the day
         quote_data = apis.get('quote', {})
@@ -103,6 +123,13 @@ class GeminiClient:
             )
         email_candidates_str = "\n".join(email_candidates_lines) if email_candidates_lines else "No unread emails in inboxes."
 
+        # Working weights benchmarks
+        ww_lines = []
+        if working_weights:
+            for ex_name, ex_data in working_weights.items():
+                ww_lines.append(f"- {ex_name}: Working: {ex_data.get('working', '--')} | PB: {ex_data.get('pb', '--')}")
+        ww_summary_str = "\n".join(ww_lines) if ww_lines else "No recorded lifts yet."
+
         is_workout_skipped = workout.get("skipped", False)
         if is_workout_skipped:
             workout_section_input = "4. Workout Status: USER IS SKIPPING WORKOUT TODAY (explicitly requested in yesterday's scratchpad). DO NOT GENERATE ANY WORKOUT SECTION."
@@ -112,16 +139,22 @@ class GeminiClient:
             for ex in workout.get('exercises', []):
                 url_part = f"[{ex['name']}]({ex.get('url', 'https://musclewiki.com')}) ↗"
                 workout_lines.append(f"- [ ] **{url_part}** — {ex['target']} (Cue: {ex['cue']})")
-            workout_section_input = f"""4. Today's Scheduled Workout ({workout.get('title')}):
+            workout_section_input = f"""4. Today's Scheduled Workout ({cycle_str}: {workout.get('title')}):
+Program Timeline: {cycle_str} (CRITICAL: Do NOT say 'Week 1, Day 1' unless week is 1 and day is 1. You MUST use {cycle_str} in any Coach's Note or headers).
 Goal: {workout.get('goal')}
 Exercises:
 {chr(10).join(workout_lines)}
-Desk Posture Cue: {workout.get('desk_mobility')}"""
-            workout_format_instruction = f"- ## 🏋️ Workout: {workout.get('title')} (include the exact workout checklist, clickable diagram links, biometrics context, and desk worker posture cues)."
+Desk Posture Cue: {workout.get('desk_mobility')}
+Recent Health Ledger Working Weights / PBs:
+{ww_summary_str}"""
+            workout_format_instruction = f"- ## 🏋️ Workout ({cycle_str}): {workout.get('title')} (include the exact workout checklist, clickable diagram links, biometrics context, desk worker posture cues, and Coach's Note referencing {cycle_str})."
+
+        mandatory_checklist = mandatory_tasks or ["Brush Teeth & Floss", "Wash Face"]
+        mandatory_tasks_str = "\n".join(f"- [ ] {t}" for t in mandatory_checklist)
 
         return f"""
 You are an executive assistant and athletic performance coach formatting a daily Obsidian note for {today_str} ({weekday_name}).
-User context: 27-year-old male tech worker living in Chicago, working at a desk, restarting fitness from square 1 (Current: 191 lbs, Goal: 165-170 lbs).
+User context: 27-year-old male tech worker living in Chicago, working at a desk, training on Square 1 On-Ramp protocol (Current: 191 lbs, Goal: 165-170 lbs). Today is {cycle_str} of the fitness program.
 
 Input Data:
 ---
@@ -158,7 +191,18 @@ Input Data:
 ---
 
 Formatting Guidelines:
-1. Output valid Markdown only. Start with Obsidian YAML frontmatter (date, tags: [daily-note], type: daily-note).
+1. Output valid Markdown only. Start with Obsidian YAML frontmatter formatted with Dataview metadata:
+---
+date: {today_str}
+tags:
+  - daily-note
+type: daily-note
+program_week: {week}
+program_day: {day}
+workout: "{workout.get('title', 'Rest / Recovery')}"
+body_weight: 191
+workout_completed: false
+---
 2. Create clear, motivating sections:
    - Header with Date: '# 📅 {weekday_name}, {today_str}'.
    - Daily Reflection Quote: Directly under the header, place the daily reflection quote in a blockquote:
@@ -172,10 +216,12 @@ Formatting Guidelines:
      - If there are no scheduled events, output: `*No scheduled calendar events today.*`
      ### 📋 Priorities & Tasks
      - CRITICAL - SYSTEM OUTAGES & WARNINGS: If any system is down, degraded, or requires reauthorization (listed in "System Health Alerts / Incidents"), you MUST create an urgent checklist task `- [ ] ⚠️` at the TOP of Priorities & Tasks to investigate and fix it (e.g. `- [ ] ⚠️ Reauthorize Google Calendar API: Run python3 reauth_google.py in terminal`; `- [ ] 🚨 Investigate DroidZero downtime`).
-     - Convert EVERY thought, errand, reminder, or idea from "Yesterday's Scratchpad & Tomorrow's Ideas" into an actionable checklist task `- [ ]` (e.g., "Put on the agenda tomorrow to schedule my swim session" -> `- [ ] Schedule morning swim session`; "I also need to order groceries" -> `- [ ] Order groceries`).
-     - ACTION FROM PRIORITY EMAIL: If the priority email requires an action (e.g. paying a bill, retrieving a package with access code, confirming travel, or replying to an urgent request), ALSO create an actionable checklist item `- [ ]` here (e.g. `- [ ] 📦 Retrieve Luxer One package from locker (Code: 382491)`).
+     - Convert EVERY thought, errand, reminder, or idea from "Yesterday's Scratchpad & Tomorrow's Ideas" into an actionable checklist task `- [ ]`.
+     - ACTION FROM PRIORITY EMAIL: If the priority email requires an action (e.g. paying a bill, retrieving a package with access code, confirming travel, or replying to an urgent request), ALSO create an actionable checklist item `- [ ]` here.
      - Also carry over any unfinished `- [ ]` tasks from the previous note.
-     - Ensure no task, idea, or system alert is lost or omitted. List all converted tasks as clear `- [ ]` items.
+     - MANDATORY DAILY HYGIENE HABITS: Always include these daily personal hygiene items at the end of Priorities & Tasks:
+{mandatory_tasks_str}
+     - Ensure no task, idea, or system alert is lost or omitted.
    - ## 📬 Priority Email Spotlight
      Review the unread email candidates. Identify the single most important or urgent email (favoring actionable human correspondence, bills, deliveries, travel, or account security alerts over automated marketing/newsletters).
      Format as:
@@ -201,10 +247,16 @@ Formatting Guidelines:
         prev: Dict[str, any],
         workout: Dict[str, any],
         apis: Dict[str, any],
-        system_incidents: Optional[List[str]] = None
+        system_incidents: Optional[List[str]] = None,
+        timeline: Optional[Dict[str, int]] = None,
+        working_weights: Optional[Dict[str, Any]] = None,
+        mandatory_tasks: Optional[List[str]] = None
     ) -> Optional[str]:
         """Calls Google Gemini REST API directly without requiring any pip dependencies."""
-        prompt = self._build_prompt(today_str, weekday_name, prev, workout, apis, system_incidents)
+        prompt = self._build_prompt(
+            today_str, weekday_name, prev, workout, apis, system_incidents,
+            timeline, working_weights, mandatory_tasks
+        )
 
         # Normalize model name for v1beta endpoint
         model = self.model_name.replace("models/", "")
@@ -263,10 +315,16 @@ Formatting Guidelines:
         prev: Dict[str, any],
         workout: Dict[str, any],
         apis: Dict[str, any],
-        system_incidents: Optional[List[str]] = None
+        system_incidents: Optional[List[str]] = None,
+        timeline: Optional[Dict[str, int]] = None,
+        working_weights: Optional[Dict[str, Any]] = None,
+        mandatory_tasks: Optional[List[str]] = None
     ) -> Optional[str]:
         """Calls Gemini using google-genai or google-generativeai SDK if available."""
-        prompt = self._build_prompt(today_str, weekday_name, prev, workout, apis, system_incidents)
+        prompt = self._build_prompt(
+            today_str, weekday_name, prev, workout, apis, system_incidents,
+            timeline, working_weights, mandatory_tasks
+        )
 
         try:
             from google import genai
@@ -290,11 +348,18 @@ Formatting Guidelines:
         prev: Dict[str, any],
         workout: Dict[str, any],
         apis: Dict[str, any],
-        system_incidents: Optional[List[str]] = None
+        system_incidents: Optional[List[str]] = None,
+        timeline: Optional[Dict[str, int]] = None,
+        working_weights: Optional[Dict[str, Any]] = None,
+        mandatory_tasks: Optional[List[str]] = None
     ) -> str:
         """Deterministic high-quality fallback generator."""
         incomplete = prev.get("incomplete_tasks", [])
         scratch = prev.get("scratchpad_notes", [])
+
+        week = timeline.get("week", 1) if timeline else 1
+        day = timeline.get("day", 1) if timeline else 1
+        cycle_str = f"Week {week}, Day {day}"
 
         tasks_md = []
         if system_incidents:
@@ -324,6 +389,11 @@ Formatting Guidelines:
                 tasks_md.append(f"- [ ] 📦 Retrieve package: {top_email.get('subject')}")
             elif "payment" in subj or "due" in subj or "bill" in subj:
                 tasks_md.append(f"- [ ] 💳 Action needed: {top_email.get('subject')}")
+
+        # Mandatory daily hygiene habits
+        mandatory_checklist = mandatory_tasks or ["Brush Teeth & Floss", "Wash Face"]
+        for m_task in mandatory_checklist:
+            tasks_md.append(f"- [ ] {m_task}")
 
         cal_data = apis.get("calendar", {})
         cal_lines = cal_data.get("calendar_lines", [])
@@ -371,7 +441,7 @@ Formatting Guidelines:
 
             workout_section_md = f"""---
 
-## 🏋️ Workout: {workout.get('title')}
+## 🏋️ Workout ({cycle_str}): {workout.get('title')}
 > **Category:** {workout.get('category')} • **Target Goal:** {workout.get('goal')}
 > **Biometrics:** Current BMI: `{workout.get('current_bmi', 27.4)}` • Goal: `165–170 lbs` (`-{workout.get('weight_to_lose', 23.5)} lbs` to target)
 
@@ -415,6 +485,11 @@ day: {weekday_name}
 tags:
   - daily-note
 type: daily-note
+program_week: {week}
+program_day: {day}
+workout: "{workout.get('title', 'Rest / Recovery')}"
+body_weight: 191
+workout_completed: false
 ---
 
 # 📅 Daily Plan: {weekday_name}, {today_str}

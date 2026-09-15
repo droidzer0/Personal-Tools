@@ -53,6 +53,17 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         config.GEMINI_MODEL
     )
 
+    # 1b. Calculate program timeline
+    delta_days = (target_date - config.PROGRAM_START_DATE).days
+    week_num = (delta_days // 7) + 1 if delta_days >= 0 else 1
+    day_num = target_date.weekday() + 1
+    timeline = {
+        "week": week_num,
+        "day": day_num,
+        "days_elapsed": delta_days
+    }
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📅 Program Timeline: Week {timeline['week']}, Day {timeline['day']} (Day {delta_days + 1} since anchor {config.PROGRAM_START_DATE})")
+
     # 2. Parse previous note
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 📖 Reading previous daily note context...")
     prev_result = parser.find_previous_note(target_date)
@@ -88,6 +99,11 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
             "skip_workout_reason": None
         }
 
+    # Load active working weights and PBs from Health Ledger
+    working_weights = parser.load_working_weights(config.HEALTH_FILE)
+    if working_weights:
+        print(f"    🏋️ Loaded {len(working_weights)} lift benchmarks from Health Ledger.")
+
     # 3. Get workout routine
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏋️ Determining today's workout & recovery plan...")
     if prev_data.get("skip_workout"):
@@ -98,13 +114,20 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
             "exercises": [],
             "desk_mobility": "Gentle stretches and walk as desired.",
             "skipped": True,
-            "skip_reason": prev_data.get("skip_workout_reason")
+            "skip_reason": prev_data.get("skip_workout_reason"),
+            "program_week": timeline["week"],
+            "program_day": timeline["day"],
+            "cycle_display": f"Week {timeline['week']}, Day {timeline['day']}"
         }
         print(f"    🛑 Workout skipped today based on yesterday's scratchpad: \"{prev_data.get('skip_workout_reason')}\"")
     else:
-        workout_data = workout_engine.get_today_routine(target_date)
+        workout_data = workout_engine.get_today_routine(
+            target_date=target_date,
+            timeline=timeline,
+            working_weights=working_weights
+        )
         workout_data["skipped"] = False
-        print(f"    Selected routine: {workout_data['title']} ({workout_data['category']})")
+        print(f"    Selected routine: {workout_data['title']} ({workout_data['category']}) - {workout_data.get('cycle_display')}")
 
     # 4. Gather Live API metrics
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🌐 Gathering Life Dashboard & external API metrics...")
@@ -169,7 +192,10 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         previous_note_data=prev_data,
         workout_data=workout_data,
         api_data=api_data,
-        system_incidents=system_incidents
+        system_incidents=system_incidents,
+        timeline=timeline,
+        working_weights=working_weights,
+        mandatory_tasks=config.MANDATORY_DAILY_TASKS
     )
 
     # 6. Target file path

@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from pathlib import Path
 # Try loading dotenv if available; otherwise parse .env manually
 try:
@@ -85,3 +86,12 @@ USER_PROFILE = {
     "cardio_preference": "Lap swimming",
     "status": "Square 1 On-Ramp (Post-illness rebuilding)"
 }
+
+# Fitness Program Progression & Tracking
+PROGRAM_START_DATE = date.fromisoformat(os.getenv("PROGRAM_START_DATE", "2026-09-07"))
+
+# Mandatory Daily Recurring Tasks (appended to every daily note's priorities)
+MANDATORY_DAILY_TASKS = [
+    "Brush Teeth & Floss",
+    "Wash Face"
+]
