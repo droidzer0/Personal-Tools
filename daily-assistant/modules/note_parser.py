@@ -198,35 +198,185 @@ class NoteParser:
         parts = re.split(r'[-—:]', text, maxsplit=1)
         return parts[0].strip()
 
+    def get_recent_workout_history(self, target_date: date, lookback_days: int = 14) -> Dict[str, Any]:
+        """
+        Scans preceding daily notes up to lookback_days to extract:
+        - Past completed exercises and actual performance weights/reps
+        - Past workout routines to detect repetition and prevent duplication across weeks
+        """
+        sessions = []
+        latest_actuals: Dict[str, Dict[str, Any]] = {}
+        recent_routines: List[Dict[str, Any]] = []
+        same_weekday_routines: List[Dict[str, Any]] = []
+
+        if not self.daily_dir.exists():
+            return {
+                "sessions": sessions,
+                "latest_actuals": latest_actuals,
+                "recent_routines": recent_routines,
+                "same_weekday_routines": same_weekday_routines,
+            }
+
+        target_weekday = target_date.weekday()
+
+        for i in range(1, lookback_days + 1):
+            past_date = target_date - timedelta(days=i)
+            file_path = self.daily_dir / f"{past_date.strftime('%Y-%m-%d')}.md"
+            if not file_path.exists():
+                continue
+
+            parsed = self.parse_note_content(file_path)
+            raw_text = parsed.get("raw_text", "")
+
+            # Extract routine title from frontmatter or markdown header
+            routine_title = None
+            fm_match = re.search(r'^workout:\s*["\']?(.*?)["\']?\s*$', raw_text, re.MULTILINE)
+            if fm_match:
+                routine_title = fm_match.group(1).strip()
+            if not routine_title:
+                h_match = re.search(r'^##\s+🏋️\s+Workout(?:\s*\([^)]*\))?:\s*(.+)$', raw_text, re.MULTILINE)
+                if h_match:
+                    routine_title = h_match.group(1).strip()
+
+            actuals = parsed.get("workout_actuals", [])
+            has_completed_workout = any(a.get("completed", False) for a in actuals) or (
+                "workout_completed: true" in raw_text.lower()
+            )
+
+            session_info = {
+                "date": past_date.strftime("%Y-%m-%d"),
+                "days_ago": i,
+                "weekday": past_date.weekday(),
+                "routine": routine_title or "Unknown Routine",
+                "completed": has_completed_workout,
+                "skipped": parsed.get("skip_workout", False),
+                "actuals": actuals
+            }
+            sessions.append(session_info)
+
+            if routine_title:
+                recent_routines.append({
+                    "date": past_date.strftime("%Y-%m-%d"),
+                    "days_ago": i,
+                    "weekday": past_date.weekday(),
+                    "title": routine_title
+                })
+                if past_date.weekday() == target_weekday:
+                    same_weekday_routines.append({
+                        "date": past_date.strftime("%Y-%m-%d"),
+                        "days_ago": i,
+                        "title": routine_title
+                    })
+
+            # Record latest actuals for each exercise (only if not recorded yet, since we iterate newest to oldest)
+            for act in actuals:
+                ex_name = act.get("exercise", "").strip()
+                raw_actual = act.get("actual", "").strip()
+                if not ex_name or not raw_actual:
+                    continue
+
+                perf = self.parse_performance(raw_actual)
+                keys = [ex_name, ex_name.lower()]
+                for canon, cdata in self.CANONICAL_EXERCISES.items():
+                    if any(alias in ex_name.lower() for alias in cdata["aliases"]):
+                        keys.append(canon)
+                        keys.append(canon.lower())
+
+                for k in keys:
+                    if k not in latest_actuals:
+                        latest_actuals[k] = {
+                            "exercise": ex_name,
+                            "actual": raw_actual,
+                            "perf": perf,
+                            "weight": perf.get("weight"),
+                            "reps": perf.get("reps"),
+                            "display": perf.get("display", raw_actual),
+                            "date": past_date.strftime("%Y-%m-%d"),
+                            "days_ago": i
+                        }
+
+        return {
+            "sessions": sessions,
+            "latest_actuals": latest_actuals,
+            "recent_routines": recent_routines,
+            "same_weekday_routines": same_weekday_routines
+        }
+
     # --- Health & Fitness Dashboard Updates ---
 
     CANONICAL_EXERCISES = {
         "Barbell Squat": {
-            "aliases": ["barbell squat", "back squat", "squat", "goblet squat (or barbell squat)", "goblet squat", "barbell back squat", "barbell front squat"],
+            "aliases": [
+                "barbell squat", "back squat", "squat", "goblet squat (or barbell squat)",
+                "goblet squat", "barbell back squat", "barbell front squat",
+                "squat rack", "squat rack barbell squat", "squat rack squats"
+            ],
             "exclusions": ["split squat", "leg press"]
         },
         "Bench Press": {
-            "aliases": ["bench press", "dumbbell bench press", "barbell bench press", "incline dumbbell press", "incline bench press", "flat bench press", "dumbbell press"],
+            "aliases": [
+                "bench press", "dumbbell bench press", "barbell bench press",
+                "incline dumbbell press", "incline bench press", "flat bench press", "dumbbell press"
+            ],
             "exclusions": []
         },
         "Barbell Deadlift": {
-            "aliases": ["barbell deadlift", "deadlift", "conventional deadlift", "sumo deadlift", "romanian deadlift", "dumbbell romanian deadlift (rdl)", "rdl"],
+            "aliases": [
+                "barbell deadlift", "deadlift", "conventional deadlift", "sumo deadlift",
+                "romanian deadlift", "dumbbell romanian deadlift (rdl)", "rdl", "barbell rdl",
+                "trap bar deadlift", "deadlifts"
+            ],
             "exclusions": []
         },
         "Cable / Dumbbell Row": {
-            "aliases": ["cable / dumbbell row", "cable row", "dumbbell row", "chest-supported dumbbell / cable row", "seated cable row", "chest supported row", "seated row", "row"],
+            "aliases": [
+                "cable / dumbbell row", "cable row", "dumbbell row",
+                "chest-supported dumbbell / cable row", "seated cable row",
+                "chest supported row", "seated row", "row"
+            ],
             "exclusions": []
         },
         "Dumbbell Overhead Press": {
-            "aliases": ["dumbbell overhead press", "standing or seated dumbbell overhead press", "overhead press", "seated dumbbell overhead press", "standing dumbbell overhead press", "shoulder press", "dumbbell shoulder press", "ohp"],
+            "aliases": [
+                "dumbbell overhead press", "standing or seated dumbbell overhead press",
+                "overhead press", "seated dumbbell overhead press", "standing dumbbell overhead press",
+                "shoulder press", "dumbbell shoulder press", "ohp"
+            ],
             "exclusions": []
         },
         "Neutral Grip Pull-Up": {
-            "aliases": ["neutral grip pull-up", "neutral grip pull up", "pull-up", "pull up", "pull-ups", "pullups", "neutral grip lat pulldown or assisted pull-ups", "assisted pull-up", "assisted pull-ups", "lat pulldown"],
+            "aliases": [
+                "neutral grip pull-up", "neutral grip pull up", "pull-up", "pull up",
+                "pull-ups", "pullups", "neutral grip lat pulldown or assisted pull-ups",
+                "assisted pull-up", "assisted pull-ups", "lat pulldown", "cable lat pulldown"
+            ],
+            "exclusions": []
+        },
+        "Kettlebell Swing": {
+            "aliases": [
+                "kettlebell swing", "kettlebell swings", "kb swing", "kb swings", "russian kettlebell swing"
+            ],
+            "exclusions": []
+        },
+        "Leg Press": {
+            "aliases": [
+                "leg press", "machine leg press", "dumbbell split squat (or leg press)", "split squat", "dumbbell split squat"
+            ],
+            "exclusions": []
+        },
+        "Cable Face Pull": {
+            "aliases": [
+                "cable face pull", "cable face pulls", "face pull", "face pulls",
+                "cable face pulls (desk posture cure)"
+            ],
             "exclusions": []
         },
         "Lap Swim (Continuous)": {
-            "aliases": ["lap swim", "lap swim (continuous)", "continuous swim", "lap swimming", "freestyle laps", "freestyle intervals", "warmup freestyle laps", "main set: freestyle intervals", "swimming"],
+            "aliases": [
+                "lap swim", "lap swim (continuous)", "continuous swim", "lap swimming",
+                "freestyle laps", "freestyle intervals", "warmup freestyle laps",
+                "main set: freestyle intervals", "swimming"
+            ],
             "exclusions": []
         }
     }

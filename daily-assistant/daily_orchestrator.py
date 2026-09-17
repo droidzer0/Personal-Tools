@@ -104,6 +104,11 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     if working_weights:
         print(f"    🏋️ Loaded {len(working_weights)} lift benchmarks from Health Ledger.")
 
+    # Load recent workout history (14-day window) to inform workout targets & prevent repetitive routines
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏋️ Parsing recent workout history (14-day window)...")
+    workout_history = parser.get_recent_workout_history(target_date, lookback_days=14)
+    print(f"    Loaded {len(workout_history['sessions'])} previous session(s) and {len(workout_history['latest_actuals'])} exercise benchmark(s).")
+
     # 3. Get workout routine
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏋️ Determining today's workout & recovery plan...")
     if prev_data.get("skip_workout"):
@@ -124,7 +129,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         workout_data = workout_engine.get_today_routine(
             target_date=target_date,
             timeline=timeline,
-            working_weights=working_weights
+            working_weights=working_weights,
+            workout_history=workout_history
         )
         workout_data["skipped"] = False
         print(f"    Selected routine: {workout_data['title']} ({workout_data['category']}) - {workout_data.get('cycle_display')}")
@@ -195,7 +201,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         system_incidents=system_incidents,
         timeline=timeline,
         working_weights=working_weights,
-        mandatory_tasks=config.MANDATORY_DAILY_TASKS
+        mandatory_tasks=config.MANDATORY_DAILY_TASKS,
+        workout_history=workout_history
     )
 
     # 6. Target file path

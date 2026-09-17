@@ -36,7 +36,8 @@ class GeminiClient:
         system_incidents: Optional[List[str]] = None,
         timeline: Optional[Dict[str, int]] = None,
         working_weights: Optional[Dict[str, Any]] = None,
-        mandatory_tasks: Optional[List[str]] = None
+        mandatory_tasks: Optional[List[str]] = None,
+        workout_history: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Calls Gemini to format and synthesize the daily note.
@@ -50,7 +51,7 @@ class GeminiClient:
             try:
                 text = self._call_gemini_rest_api(
                     today_str, weekday_name, previous_note_data, workout_data, api_data,
-                    system_incidents, timeline, working_weights, mandatory_tasks
+                    system_incidents, timeline, working_weights, mandatory_tasks, workout_history
                 )
                 if text:
                     return text
@@ -61,7 +62,7 @@ class GeminiClient:
             try:
                 text = self._call_gemini_sdk(
                     today_str, weekday_name, previous_note_data, workout_data, api_data,
-                    system_incidents, timeline, working_weights, mandatory_tasks
+                    system_incidents, timeline, working_weights, mandatory_tasks, workout_history
                 )
                 if text:
                     return text
@@ -70,7 +71,7 @@ class GeminiClient:
 
         return self._deterministic_generation(
             today_str, weekday_name, previous_note_data, workout_data, api_data,
-            system_incidents, timeline, working_weights, mandatory_tasks
+            system_incidents, timeline, working_weights, mandatory_tasks, workout_history
         )
 
     def _build_prompt(
@@ -83,7 +84,8 @@ class GeminiClient:
         system_incidents: Optional[List[str]] = None,
         timeline: Optional[Dict[str, int]] = None,
         working_weights: Optional[Dict[str, Any]] = None,
-        mandatory_tasks: Optional[List[str]] = None
+        mandatory_tasks: Optional[List[str]] = None,
+        workout_history: Optional[Dict[str, Any]] = None
     ) -> str:
         cal_data = apis.get('calendar', {})
         cal_lines = cal_data.get('calendar_lines', [])
@@ -130,6 +132,18 @@ class GeminiClient:
                 ww_lines.append(f"- {ex_name}: Working: {ex_data.get('working', '--')} | PB: {ex_data.get('pb', '--')}")
         ww_summary_str = "\n".join(ww_lines) if ww_lines else "No recorded lifts yet."
 
+        # Recent workout history & completed lifts
+        history_lines = []
+        if workout_history and workout_history.get("sessions"):
+            for sess in workout_history["sessions"][:7]:
+                act_parts = []
+                for a in sess.get("actuals", []):
+                    if a.get("actual"):
+                        act_parts.append(f"{a.get('exercise')}: {a.get('actual')}")
+                act_str = "; ".join(act_parts) if act_parts else ("Completed" if sess.get("completed") else ("Skipped" if sess.get("skipped") else "Rest"))
+                history_lines.append(f"- {sess.get('date')} ({sess.get('routine')}): {act_str}")
+        history_summary_str = "\n".join(history_lines) if history_lines else "No recent logged workout history."
+
         is_workout_skipped = workout.get("skipped", False)
         if is_workout_skipped:
             workout_section_input = "4. Workout Status: USER IS SKIPPING WORKOUT TODAY (explicitly requested in yesterday's scratchpad). DO NOT GENERATE ANY WORKOUT SECTION."
@@ -142,12 +156,20 @@ class GeminiClient:
             workout_section_input = f"""4. Today's Scheduled Workout ({cycle_str}: {workout.get('title')}):
 Program Timeline: {cycle_str} (CRITICAL: Do NOT say 'Week 1, Day 1' unless week is 1 and day is 1. You MUST use {cycle_str} in any Coach's Note or headers).
 Goal: {workout.get('goal')}
-Exercises:
+Exercises & Concrete Calibrated Targets:
 {chr(10).join(workout_lines)}
 Desk Posture Cue: {workout.get('desk_mobility')}
+Recent Completed Workout Sessions & Logged Actuals:
+{history_summary_str}
 Recent Health Ledger Working Weights / PBs:
 {ww_summary_str}"""
-            workout_format_instruction = f"- ## 🏋️ Workout ({cycle_str}): {workout.get('title')} (include the exact workout checklist, clickable diagram links, biometrics context, desk worker posture cues, and Coach's Note referencing {cycle_str})."
+            workout_format_instruction = f"""- ## 🏋️ Workout ({cycle_str}): {workout.get('title')}
+      * STRICT FORBIDDEN TERMS: NEVER use subjective, vague load descriptors such as "moderate", "light", "heavy", "moderate load", "light weight", or "challenging weight". Every single strength or resistance exercise recommendation MUST specify concrete numbers or ranges in lbs (e.g. "3 sets x 10 reps @ 140–150 lbs", "3 sets x 10 reps @ 35–40 lbs each", "3 sets x 12 reps @ 70–80 lbs").
+      * EXERCISE TARGETS: You MUST keep the exact concrete exercise targets generated in Section 4 above (which have been dynamically calibrated from the user's completed sessions and logged actuals).
+      * WEEKLY VARIETY & ROTATION: The workout engine uses alternating tracks (Track A & Track B) featuring compound lifts like Squat Rack Barbell Squats, Barbell Deadlifts, and Kettlebell Swings so that workouts never match identically across consecutive weeks (preventing duplicate days like 9/16 matching 9/9). Highlight this variety in your Coach's Note.
+      * Interactive checkboxes: Include the exact workout checklist, clickable MuscleWiki diagram links, biometrics context, desk worker posture cues, and indented lines for mobile logging:
+        `- [ ] [**Exercise Name**](URL) ↗ — target (Cue: cue)`
+        `  - Actual: ___ lbs x ___ reps`"""
 
         mandatory_checklist = mandatory_tasks or ["Brush Teeth & Floss", "Wash Face"]
         mandatory_tasks_str = "\n".join(f"- [ ] {t}" for t in mandatory_checklist)
@@ -250,12 +272,13 @@ workout_completed: false
         system_incidents: Optional[List[str]] = None,
         timeline: Optional[Dict[str, int]] = None,
         working_weights: Optional[Dict[str, Any]] = None,
-        mandatory_tasks: Optional[List[str]] = None
+        mandatory_tasks: Optional[List[str]] = None,
+        workout_history: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
         """Calls Google Gemini REST API directly without requiring any pip dependencies."""
         prompt = self._build_prompt(
             today_str, weekday_name, prev, workout, apis, system_incidents,
-            timeline, working_weights, mandatory_tasks
+            timeline, working_weights, mandatory_tasks, workout_history
         )
 
         # Normalize model name for v1beta endpoint
@@ -318,12 +341,13 @@ workout_completed: false
         system_incidents: Optional[List[str]] = None,
         timeline: Optional[Dict[str, int]] = None,
         working_weights: Optional[Dict[str, Any]] = None,
-        mandatory_tasks: Optional[List[str]] = None
+        mandatory_tasks: Optional[List[str]] = None,
+        workout_history: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
         """Calls Gemini using google-genai or google-generativeai SDK if available."""
         prompt = self._build_prompt(
             today_str, weekday_name, prev, workout, apis, system_incidents,
-            timeline, working_weights, mandatory_tasks
+            timeline, working_weights, mandatory_tasks, workout_history
         )
 
         try:
@@ -351,7 +375,8 @@ workout_completed: false
         system_incidents: Optional[List[str]] = None,
         timeline: Optional[Dict[str, int]] = None,
         working_weights: Optional[Dict[str, Any]] = None,
-        mandatory_tasks: Optional[List[str]] = None
+        mandatory_tasks: Optional[List[str]] = None,
+        workout_history: Optional[Dict[str, Any]] = None
     ) -> str:
         """Deterministic high-quality fallback generator."""
         incomplete = prev.get("incomplete_tasks", [])
