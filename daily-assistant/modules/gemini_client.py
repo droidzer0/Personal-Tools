@@ -90,7 +90,16 @@ class GeminiClient:
         cal_data = apis.get('calendar', {})
         cal_lines = cal_data.get('calendar_lines', [])
         cal_summary_str = '\n'.join(cal_lines) if cal_lines else "No scheduled calendar events today."
-        markets_str = ', '.join(q.get('display', '') for q in apis.get('markets', []))
+        markets_raw = apis.get('markets', [])
+        markets_str = ', '.join(q.get('display', '') for q in markets_raw)
+        is_weekend_markets = any(q.get('is_weekend', False) for q in markets_raw)
+        if is_weekend_markets or not markets_raw:
+            market_guidelines = "- Market Watchlist: Indicate that markets are closed on weekends (*Markets closed on weekends.*)."
+        else:
+            market_bullets = "\n".join(f"        - {q.get('display', '')}" for q in markets_raw)
+            market_guidelines = f"""- Market Watchlist (CRITICAL INVARIANT - ALL TICKERS MANDATORY):
+        You MUST include every single tracked ticker listed below under a '### Market Watchlist' subsection. NEVER omit, filter, truncate, or cherry-pick tickers (such as omitting NOW, VT, or IGV). Output all tickers using bullet points exactly as provided:
+{market_bullets}"""
 
         # Program timeline
         week = timeline.get("week", 1) if timeline else 1
@@ -256,7 +265,10 @@ workout_completed: false
    - ## 📰 Daily News Briefing
      Present today's authentic news headlines with clickable links:
 {news_summary_str}
-   - ## 📊 Life Dashboard Pulse (compact table or bullets covering DroidZero, VM health, Gmail triage, Calendar sync status, and Market Watchlist).
+   - ## 📊 Life Dashboard Pulse:
+     Must include:
+     - ### System Status: Compact markdown table covering DroidZero website latency/SSL, VM load & disk, Gmail unread triage, and Google Calendar sync.
+     {market_guidelines}
    - ## 📝 Scratchpad & Tomorrow's Ideas (empty space for the user to jot notes during the day).
 3. Ensure all workout items (if workout is active today) have interactive checkboxes: `- [ ] [**Exercise Name**](URL) ↗ — target` and an indented line `  - Actual: `___ lbs x ___ reps`` for mobile logging.
 4. Keep the output clean, sharp, and directly usable in Obsidian. Do not wrap in ```markdown code fences.
@@ -502,7 +514,14 @@ workout_completed: false
 ## 📰 Daily News Briefing
 {chr(10).join(news_lines)}"""
 
-        market_lines = " • ".join(q.get("display", "") for q in apis.get("markets", []))
+        markets_raw = apis.get("markets", [])
+        if any(q.get("is_weekend", False) for q in markets_raw):
+            market_section_md = "### Market Watchlist\n*Markets closed on weekends.*"
+        elif markets_raw:
+            market_bullets = "\n".join(f"- {q.get('display', '')}" for q in markets_raw)
+            market_section_md = f"### Market Watchlist\n{market_bullets}"
+        else:
+            market_section_md = "### Market Watchlist\n*Market data unavailable.*"
 
         return f"""---
 date: {today_str}
@@ -545,8 +564,7 @@ workout_completed: false
 | **📅 Google Calendar** | {cal_data.get('status', 'Ready')} | [[Dashboard|Command Center]] |
 | **💪 Health Ledger** | Weight: `191 lbs` • Weekly weigh-in on Sunday | [[Health & Fitness|Health Dashboard]] |
 
-**📈 Markets & Tickers:**
-{market_lines if market_lines else "VOO • VTI • VT • QQQ • IGV • NOW • BTC • ETH"}
+{market_section_md}
 
 ---
 
