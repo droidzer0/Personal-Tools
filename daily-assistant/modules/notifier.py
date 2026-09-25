@@ -47,10 +47,11 @@ class Notifier:
     def build_obsidian_uri(self, target_date: date) -> str:
         """
         Builds a native Obsidian deep link for the specified daily note.
-        Format: obsidian://open?vault=<VAULT>&file=Daily%2F<YYYY-MM-DD>
+        Format: obsidian://open?vault=<VAULT>&file=Daily%2F<YYYY>%2F<Month>%2F<YYYY-MM-DD>
         """
         vault_encoded = urllib.parse.quote(self.vault_name)
-        file_encoded = urllib.parse.quote(f"Daily/{target_date.strftime('%Y-%m-%d')}")
+        rel_note_path = f"Daily/{target_date.year}/{target_date.strftime('%B')}/{target_date.strftime('%Y-%m-%d')}"
+        file_encoded = urllib.parse.quote(rel_note_path)
         return f"obsidian://open?vault={vault_encoded}&file={file_encoded}"
 
     def send_daily_note_notification(

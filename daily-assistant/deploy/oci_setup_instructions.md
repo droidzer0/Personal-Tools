@@ -11,7 +11,7 @@ This guide explains how to set up the Daily Assistant on your Oracle Cloud Infra
    - Pulls edits made on phone/laptop yesterday.
    - Gathers live stats (DroidZero, OCI load, Gmail triage, Markets, Weather).
    - Calls Gemini with the customized 27yo tech worker workout plan.
-   - Writes `Daily/YYYY-MM-DD.md`.
+   - Writes `Daily/YYYY/Month/YYYY-MM-DD.md`.
    - Pushes directly back to CouchDB.
 4. You open Obsidian on your phone, and it syncs in 1–2 seconds.
 

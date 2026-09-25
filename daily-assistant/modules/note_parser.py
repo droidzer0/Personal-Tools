@@ -7,6 +7,20 @@ class NoteParser:
     def __init__(self, daily_dir: Path):
         self.daily_dir = daily_dir
 
+    def get_note_path_for_date(self, note_date: date) -> Optional[Path]:
+        """
+        Returns the Path to a daily note for note_date, checking the nested
+        structure (Daily/YYYY/MonthName/YYYY-MM-DD.md) first, and falling back
+        to the root Daily/ folder (Daily/YYYY-MM-DD.md) for backwards compatibility.
+        """
+        nested_path = self.daily_dir / str(note_date.year) / note_date.strftime("%B") / f"{note_date.strftime('%Y-%m-%d')}.md"
+        if nested_path.exists():
+            return nested_path
+        flat_path = self.daily_dir / f"{note_date.strftime('%Y-%m-%d')}.md"
+        if flat_path.exists():
+            return flat_path
+        return None
+
     def find_previous_note(self, target_date: date) -> Optional[Tuple[date, Path]]:
         """Find the note from yesterday, or the most recent preceding note within the last 14 days."""
         if not self.daily_dir.exists():
@@ -14,15 +28,15 @@ class NoteParser:
 
         # Check yesterday first
         yesterday = target_date - timedelta(days=1)
-        yesterday_file = self.daily_dir / f"{yesterday.strftime('%Y-%m-%d')}.md"
-        if yesterday_file.exists():
+        yesterday_file = self.get_note_path_for_date(yesterday)
+        if yesterday_file:
             return yesterday, yesterday_file
 
         # Fallback: scan backwards up to 14 days
         for i in range(2, 15):
             past_date = target_date - timedelta(days=i)
-            candidate = self.daily_dir / f"{past_date.strftime('%Y-%m-%d')}.md"
-            if candidate.exists():
+            candidate = self.get_note_path_for_date(past_date)
+            if candidate:
                 return past_date, candidate
 
         return None
@@ -221,8 +235,8 @@ class NoteParser:
 
         for i in range(1, lookback_days + 1):
             past_date = target_date - timedelta(days=i)
-            file_path = self.daily_dir / f"{past_date.strftime('%Y-%m-%d')}.md"
-            if not file_path.exists():
+            file_path = self.get_note_path_for_date(past_date)
+            if not file_path:
                 continue
 
             parsed = self.parse_note_content(file_path)

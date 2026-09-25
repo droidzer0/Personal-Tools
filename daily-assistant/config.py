@@ -14,6 +14,8 @@ except ImportError:
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
+from typing import Optional
+
 # Base paths
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
@@ -30,6 +32,20 @@ VAULT_PATH = Path(
 )
 
 DAILY_DIR = VAULT_PATH / "Daily"
+
+def get_daily_note_dir(target_date: date, vault_path: Optional[Path] = None) -> Path:
+    """Returns the month directory for a given target date: Daily/YYYY/MonthName"""
+    base = (vault_path or VAULT_PATH) / "Daily"
+    return base / str(target_date.year) / target_date.strftime("%B")
+
+def get_daily_note_path(target_date: date, vault_path: Optional[Path] = None) -> Path:
+    """Returns the full Path to the daily note: Daily/YYYY/MonthName/YYYY-MM-DD.md"""
+    return get_daily_note_dir(target_date, vault_path) / f"{target_date.strftime('%Y-%m-%d')}.md"
+
+def get_daily_note_rel_path(target_date: date) -> str:
+    """Returns the vault-relative path: Daily/YYYY/MonthName/YYYY-MM-DD.md"""
+    return f"Daily/{target_date.year}/{target_date.strftime('%B')}/{target_date.strftime('%Y-%m-%d')}.md"
+
 HEALTH_FILE = VAULT_PATH / "Life Dashboard" / "Health" / "Health & Fitness.md"
 FINANCE_FILE = VAULT_PATH / "Life Dashboard" / "Finance" / "Finance Dashboard.md"
 DASHBOARD_FILE = VAULT_PATH / "Dashboard.md"

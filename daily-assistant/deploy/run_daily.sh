@@ -32,7 +32,7 @@ echo "Executing daily orchestrator using ${PYTHON_BIN}..."
 
 # Optional: Push newly created note back into CouchDB
 if command -v livesync-cli &> /dev/null; then
-    TODAY_NOTE="Daily/$(date +'%Y-%m-%d').md"
+    TODAY_NOTE="Daily/$(date +'%Y')/$(date +'%B')/$(date +'%Y-%m-%d').md"
     echo "Pushing newly created note to CouchDB via livesync-cli..."
     livesync-cli push "/data/${TODAY_NOTE}" "${TODAY_NOTE}" || true
     livesync-cli sync || true

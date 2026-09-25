@@ -32,9 +32,11 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     if shutil.which("livesync-cli") and not dry_run:
         try:
             subprocess.run(["livesync-cli", "sync"], timeout=30, check=False)
-            yesterday_str = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
-            rel_path = f"Daily/{yesterday_str}.md"
+            yesterday = target_date - timedelta(days=1)
+            rel_path = config.get_daily_note_rel_path(yesterday)
             subprocess.run(["livesync-cli", "pull", rel_path, f"/data/{rel_path}"], timeout=15, check=False)
+            flat_rel_path = f"Daily/{yesterday.strftime('%Y-%m-%d')}.md"
+            subprocess.run(["livesync-cli", "pull", flat_rel_path, f"/data/{flat_rel_path}"], timeout=15, check=False)
             health_rel = "Life Dashboard/Health/Health & Fitness.md"
             subprocess.run(["livesync-cli", "pull", health_rel, f"/data/{health_rel}"], timeout=15, check=False)
         except Exception as e:
@@ -206,7 +208,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     )
 
     # 6. Target file path
-    target_file = config.DAILY_DIR / f"{target_date.strftime('%Y-%m-%d')}.md"
+    target_dir = config.get_daily_note_dir(target_date)
+    target_file = config.get_daily_note_path(target_date)
 
     if dry_run:
         print(f"\n--- [DRY RUN PREVIEW: {target_file}] ---\n")
@@ -219,8 +222,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         print(f"⚠️ Note {target_file.name} already exists. Use --force to overwrite. Exiting without changes.")
         return
 
-    # Ensure Daily/ directory exists
-    config.DAILY_DIR.mkdir(parents=True, exist_ok=True)
+    # Ensure Year/Month directory exists
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     # Write note
     target_file.write_text(note_content, encoding="utf-8")
@@ -239,7 +242,7 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     if shutil.which("livesync-cli"):
         try:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Pushing newly created note and Health Dashboard to CouchDB via livesync-cli...")
-            rel_path = f"Daily/{target_date.strftime('%Y-%m-%d')}.md"
+            rel_path = config.get_daily_note_rel_path(target_date)
             subprocess.run(["livesync-cli", "push", f"/data/{rel_path}", rel_path], timeout=30, check=False)
             health_rel = "Life Dashboard/Health/Health & Fitness.md"
             subprocess.run(["livesync-cli", "push", f"/data/{health_rel}", health_rel], timeout=30, check=False)

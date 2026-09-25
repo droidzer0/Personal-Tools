@@ -9,7 +9,7 @@ Stateless, autonomous batch engine that runs daily to:
 6. **Financial Markets**: Fetch financial market indexes (VOO, QQQ, BTC, ETH) with daily delta indicators.
 7. **Chicago Weather**: Real-time precipitation forecasting and conditions.
 8. **Gemini AI Synthesis**: Use Google Gemini API (`gemini-3.5-flash`) to synthesize into a clean Markdown note.
-9. **Vault Delivery**: Write today's note directly into the Obsidian Vault (`Daily/YYYY-MM-DD.md`) for instant sync to iPhone.
+9. **Vault Delivery**: Write today's note directly into the Obsidian Vault (`Daily/YYYY/Month/YYYY-MM-DD.md`) organized cleanly by Year and Month subfolders for instant sync to iPhone.
 
 ---
 
