@@ -141,6 +141,10 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🌐 Gathering Life Dashboard & external API metrics...")
     website_status = api_hub.check_website_status()
     print(f"    DroidZero: {website_status['message']}")
+    if website_status.get("duckdns_status"):
+        print(f"    DuckDNS:   {website_status['duckdns_status']}")
+    if website_status.get("cert_status"):
+        print(f"    TLS Certs: {website_status['cert_status']}")
 
     instance_health = api_hub.get_instance_health()
     print(f"    Instance Load: {instance_health['load_avg']} | Free Disk: {instance_health['disk_free_gb']}")

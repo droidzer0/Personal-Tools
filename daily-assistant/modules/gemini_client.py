@@ -202,6 +202,8 @@ Input Data:
 
 5. Life Dashboard & System Status:
 - Website (DroidZero): {apis.get('website', {}).get('message', 'Online')}
+- DuckDNS (droidzero.duckdns.org): {apis.get('website', {}).get('duckdns_status', '🟢 Active')}
+- SSL/TLS Certificates: {apis.get('website', {}).get('cert_status', '🟢 Valid')}
 - Server Instance Load: {apis.get('instance', {}).get('load_avg', 'Normal')} | Disk Free: {apis.get('instance', {}).get('disk_free_gb', 'N/A')}
 - Chicago Weather: {apis.get('weather', {}).get('summary', 'Seasonal')}
 - Gmail Triage: {apis.get('gmail', {}).get('status', 'Ready')}
@@ -267,7 +269,13 @@ workout_completed: false
 {news_summary_str}
    - ## 📊 Life Dashboard Pulse:
      Must include:
-     - ### System Status: Compact markdown table covering DroidZero website latency/SSL, VM load & disk, Gmail unread triage, and Google Calendar sync.
+     - ### System Status: Compact markdown table containing explicit rows for:
+       - **🌐 DroidZero Site**: HTTP status, latency, and brief SSL summary
+       - **🦆 DuckDNS (`droidzero.duckdns.org`)**: Exact DuckDNS resolution IP, dynamic DNS timer/renewal status, SSL countdown, and domain expiration status from Input Data
+       - **🔒 SSL/TLS Certificates**: Exact days until expiration (`X days until expiration`), expiration date (`YYYY-MM-DD`), issuer, and Tailscale key expiry status if present in Input Data
+       - **🖥️ OCI Instance**: VM load averages and free disk space
+       - **📧 Gmail Inboxes**: Unread triage counts across accounts
+       - **📅 Google Calendar**: Today's event count and sync status
      {market_guidelines}
    - ## 📝 Scratchpad & Tomorrow's Ideas (empty space for the user to jot notes during the day).
 3. Ensure all workout items (if workout is active today) have interactive checkboxes: `- [ ] [**Exercise Name**](URL) ↗ — target` and an indented line `  - Actual: `___ lbs x ___ reps`` for mobile logging.
@@ -523,6 +531,17 @@ workout_completed: false
         else:
             market_section_md = "### Market Watchlist\n*Market data unavailable.*"
 
+        website_data = apis.get('website', {})
+        duckdns_status = website_data.get('duckdns_status') or '🟢 Active (droidzero.duckdns.org)'
+        cert_status = website_data.get('cert_status')
+        if not cert_status:
+            ssl_days = website_data.get('ssl_days_remaining')
+            if ssl_days is not None:
+                exp_on = website_data.get('ssl_expires_on', 'unknown')
+                cert_status = f"🟢 {ssl_days} days until expiration (expires {exp_on})"
+            else:
+                cert_status = "⚪ Certificate expiry unavailable"
+
         return f"""---
 date: {today_str}
 day: {weekday_name}
@@ -541,7 +560,7 @@ workout_completed: false
 {quote_md}
 
 > 🌤️ **Chicago Weather:** {apis.get('weather', {}).get('summary', 'Chicago, IL')}
-> 🌐 **DroidZero:** {apis.get('website', {}).get('message', 'Online')} • **VM Load:** `{apis.get('instance', {}).get('load_avg', 'N/A')}`
+> 🌐 **DroidZero:** {website_data.get('message', 'Online')} • **VM Load:** `{apis.get('instance', {}).get('load_avg', 'N/A')}`
 
 ---
 
@@ -556,9 +575,12 @@ workout_completed: false
 
 ## 📊 Life Dashboard Pulse
 
+### System Status
 | Service | Status & Metrics | Quick Action |
 | :--- | :--- | :--- |
-| **🌐 DroidZero Site** | {apis.get('website', {}).get('message', 'Online')} | [[00-DroidZero-Master-Hub|Master Hub]] |
+| **🌐 DroidZero Site** | {website_data.get('message', 'Online')} | [[00-DroidZero-Master-Hub|Master Hub]] |
+| **🦆 DuckDNS (`droidzero.duckdns.org`)** | {duckdns_status} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
+| **🔒 SSL/TLS Certificates** | {cert_status} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **🖥️ OCI Instance** | Load: `{apis.get('instance', {}).get('load_avg', 'N/A')}` • Disk Free: `{apis.get('instance', {}).get('disk_free_gb', 'N/A')}` | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **📧 Gmail Inboxes** | {apis.get('gmail', {}).get('status', 'Ready')} | [[Subscriptions Report|Subscriptions]] |
 | **📅 Google Calendar** | {cal_data.get('status', 'Ready')} | [[Dashboard|Command Center]] |

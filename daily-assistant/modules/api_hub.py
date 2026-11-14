@@ -1,15 +1,19 @@
 import os
+import sys
 import json
 import ssl
 import socket
+import subprocess
+import tempfile
 import datetime
 import html
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
+import urllib.parse
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 def get_ssl_context():
     """Returns an SSL context that works reliably across macOS and Linux environments."""
@@ -18,6 +22,12 @@ def get_ssl_context():
         return ssl.create_default_context(cafile=certifi.where())
     except Exception:
         pass
+    for cafile in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem", "/etc/pki/tls/certs/ca-bundle.crt"):
+        if os.path.exists(cafile):
+            try:
+                return ssl.create_default_context(cafile=cafile)
+            except Exception:
+                pass
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -26,6 +36,70 @@ def get_ssl_context():
     except Exception:
         return ssl._create_unverified_context()
 
+def _parse_x509_not_after(raw_date: str) -> Optional[datetime.datetime]:
+    """Parses OpenSSL/stdlib ASN.1 date strings into naive UTC datetime."""
+    if not raw_date:
+        return None
+    normalized = re.sub(r"\s+", " ", raw_date.strip())
+    for fmt in ("%b %d %H:%M:%S %Y %Z", "%b %d %H:%M:%S %Y"):
+        try:
+            return datetime.datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    return None
+
+def _extract_issuer_name(issuer_tuple: Any) -> Optional[str]:
+    """Extracts organizationName or commonName from Python ssl peer cert issuer structure."""
+    if not issuer_tuple:
+        return None
+    fields: Dict[str, str] = {}
+    for rdn in issuer_tuple:
+        for attr in rdn:
+            if isinstance(attr, (tuple, list)) and len(attr) == 2:
+                fields[attr[0]] = attr[1]
+    return fields.get("organizationName") or fields.get("commonName")
+
+def _decode_der_cert_fallback(der_bytes: bytes) -> Dict[str, Optional[str]]:
+    """Decodes DER X.509 bytes without external dependencies when getpeercert() is unverified."""
+    pem = ssl.DER_cert_to_PEM_cert(der_bytes)
+    not_after_str: Optional[str] = None
+    issuer_name: Optional[str] = None
+
+    test_decode = getattr(getattr(ssl, "_ssl", None), "_test_decode_cert", None)
+    if callable(test_decode):
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".pem", encoding="utf-8") as tmp:
+                tmp.write(pem)
+                tmp.flush()
+                decoded = test_decode(tmp.name)
+                if isinstance(decoded, dict):
+                    not_after_str = decoded.get("notAfter")
+                    issuer_name = _extract_issuer_name(decoded.get("issuer"))
+        except Exception:
+            pass
+
+    if not not_after_str:
+        try:
+            proc = subprocess.run(
+                ["openssl", "x509", "-noout", "-enddate", "-issuer"],
+                input=pem,
+                text=True,
+                capture_output=True,
+                timeout=3
+            )
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    if line.startswith("notAfter="):
+                        not_after_str = line.split("=", 1)[1].strip()
+                    elif line.startswith("issuer="):
+                        m_org = re.search(r"(?:O|CN)\s*=\s*([^,\n/]+)", line)
+                        if m_org:
+                            issuer_name = m_org.group(1).strip()
+        except Exception:
+            pass
+
+    return {"notAfter": not_after_str, "issuer": issuer_name}
+
 class ApiHub:
     def __init__(self, droidzero_url: str, gmail_creds_path: Path, gmail_tokens_dir: Path):
         self.droidzero_url = droidzero_url
@@ -33,45 +107,234 @@ class ApiHub:
         self.gmail_tokens_dir = gmail_tokens_dir
         self.ssl_ctx = get_ssl_context()
 
-    def check_website_status(self) -> Dict[str, any]:
-        """Checks DroidZero website availability, response time, and SSL validity."""
-        result = {
-            "url": self.droidzero_url,
+    def _inspect_tls_certificate(self, hostname: str, port: int = 443) -> Dict[str, Any]:
+        """Connects via TLS to extract certificate expiration date, days remaining, and issuer."""
+        cert_info: Dict[str, Any] = {
+            "ssl_days_remaining": None,
+            "ssl_days_left": None,
+            "ssl_expires_on": None,
+            "ssl_issuer": None
+        }
+        if not hostname:
+            return cert_info
+
+        cert_dict: Dict[str, Any] = {}
+        der_bytes: Optional[bytes] = None
+
+        # 1. Try verified TLS context first so getpeercert() returns parsed fields directly
+        verified_ctx = None
+        for cafile in (
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/ssl/cert.pem",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ):
+            if os.path.exists(cafile):
+                try:
+                    verified_ctx = ssl.create_default_context(cafile=cafile)
+                    break
+                except Exception:
+                    pass
+        if verified_ctx is None:
+            try:
+                verified_ctx = ssl.create_default_context()
+            except Exception:
+                verified_ctx = None
+
+        for ctx in (verified_ctx, ssl._create_unverified_context()):
+            if ctx is None:
+                continue
+            try:
+                with socket.create_connection((hostname, port), timeout=3.0) as sock:
+                    with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+                        cert_dict = ssock.getpeercert() or {}
+                        der_bytes = ssock.getpeercert(binary_form=True)
+                        if cert_dict.get("notAfter") or der_bytes:
+                            break
+            except Exception:
+                continue
+
+        not_after_raw = cert_dict.get("notAfter")
+        issuer_name = _extract_issuer_name(cert_dict.get("issuer"))
+
+        if not not_after_raw and der_bytes:
+            fallback = _decode_der_cert_fallback(der_bytes)
+            not_after_raw = fallback.get("notAfter")
+            issuer_name = issuer_name or fallback.get("issuer")
+
+        expire_dt = _parse_x509_not_after(not_after_raw or "")
+        if expire_dt:
+            now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            remaining = (expire_dt - now_utc).days
+            cert_info["ssl_days_remaining"] = remaining
+            cert_info["ssl_days_left"] = remaining
+            cert_info["ssl_expires_on"] = expire_dt.strftime("%Y-%m-%d")
+
+        cert_info["ssl_issuer"] = issuer_name
+        return cert_info
+
+    @staticmethod
+    def _check_systemd_timer(unit_names: Tuple[str, ...]) -> Optional[str]:
+        """Checks systemd timer active state on Linux hosts; returns state string or None."""
+        if not sys.platform.startswith("linux"):
+            return None
+        for unit in unit_names:
+            try:
+                proc = subprocess.run(
+                    ["systemctl", "is-active", unit],
+                    text=True,
+                    capture_output=True,
+                    timeout=2
+                )
+                state = (proc.stdout or "").strip()
+                if proc.returncode == 0 and state:
+                    return state
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _check_tailscale_key_expiry() -> Dict[str, Any]:
+        """Checks Tailscale node key expiration on Linux hosts if tailscale CLI is present."""
+        info: Dict[str, Any] = {
+            "tailscale_key_days_remaining": None,
+            "tailscale_key_expires_on": None,
+            "tailscale_key_disabled": False
+        }
+        if not sys.platform.startswith("linux"):
+            return info
+        try:
+            proc = subprocess.run(
+                ["tailscale", "status", "--json"],
+                text=True,
+                capture_output=True,
+                timeout=2
+            )
+            if proc.returncode != 0 or not proc.stdout:
+                return info
+            data = json.loads(proc.stdout)
+            key_exp = (data.get("Self") or {}).get("KeyExpiry")
+            if not key_exp or key_exp.startswith("0001-01-01"):
+                info["tailscale_key_disabled"] = True
+                return info
+            exp_clean = key_exp.replace("Z", "+00:00")
+            exp_dt = datetime.datetime.fromisoformat(exp_clean)
+            if exp_dt.tzinfo is not None:
+                exp_dt = exp_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            info["tailscale_key_days_remaining"] = (exp_dt - now_utc).days
+            info["tailscale_key_expires_on"] = exp_dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+        return info
+
+    def check_website_status(self, url: Optional[str] = None) -> Dict[str, any]:
+        """Checks DroidZero availability, DuckDNS resolution, and TLS certificate expiration."""
+        target_url = url or self.droidzero_url or "https://droidzero.duckdns.org"
+        parsed = urllib.parse.urlparse(target_url)
+        hostname = parsed.hostname or target_url.replace("https://", "").replace("http://", "").split("/")[0]
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+        result: Dict[str, Any] = {
+            "url": target_url,
+            "hostname": hostname,
             "is_up": False,
+            "status": "Offline",
             "status_code": None,
             "latency_ms": None,
             "ssl_days_remaining": None,
+            "ssl_days_left": None,
+            "ssl_expires_on": None,
+            "ssl_issuer": None,
+            "duckdns_ip": None,
+            "duckdns_timer": None,
+            "certbot_timer": None,
+            "tailscale_key_days_remaining": None,
+            "tailscale_key_expires_on": None,
+            "duckdns_status": "",
+            "cert_status": "",
             "message": ""
         }
 
+        # 1. Resolve DuckDNS hostname cleanly
+        try:
+            if hostname:
+                result["duckdns_ip"] = socket.gethostbyname(hostname)
+        except Exception:
+            result["duckdns_ip"] = None
+
+        # 2. Probe HTTP availability & latency
+        http_error_msg = None
         try:
             start_time = datetime.datetime.now()
             req = urllib.request.Request(
-                self.droidzero_url,
+                target_url,
                 headers={"User-Agent": "Mozilla/5.0 (LifeDashboardBot/1.0)"}
             )
             with urllib.request.urlopen(req, timeout=5, context=self.ssl_ctx) as response:
                 latency = (datetime.datetime.now() - start_time).total_seconds() * 1000
                 result["is_up"] = (response.status == 200)
+                result["status"] = "Online" if response.status == 200 else "Degraded"
                 result["status_code"] = response.status
                 result["latency_ms"] = round(latency, 1)
-
-            # Check SSL expiration
-            hostname = self.droidzero_url.replace("https://", "").replace("http://", "").split("/")[0]
-            with socket.create_connection((hostname, 443), timeout=3.0) as sock:
-                with self.ssl_ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
-                    cert = ssock.getpeercert()
-                    if cert and 'notAfter' in cert:
-                        expire_date = datetime.datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y %Z")
-                        remaining = (expire_date - datetime.datetime.utcnow()).days
-                        result["ssl_days_remaining"] = remaining
-
-            ssl_info = f", SSL: {result['ssl_days_remaining']}d left" if result['ssl_days_remaining'] is not None else ""
-            result["message"] = f"🟢 Online (HTTP {result['status_code']}, {result['latency_ms']}ms{ssl_info})"
-
         except Exception as e:
             result["is_up"] = False
-            result["message"] = f"🔴 Offline / Error: {str(e)[:50]}"
+            result["status"] = "Offline"
+            http_error_msg = str(e)[:50]
+
+        # 3. Inspect TLS certificate expiration (works even without certifi)
+        if hostname:
+            cert_port = port if parsed.scheme == "https" else 443
+            cert_info = self._inspect_tls_certificate(hostname, cert_port)
+            result.update(cert_info)
+
+        # 4. Inspect OCI systemd renewal timers & Tailscale key expiry when running on Linux
+        result["duckdns_timer"] = self._check_systemd_timer(("duckdns.timer",))
+        result["certbot_timer"] = self._check_systemd_timer(("certbot.timer", "snap.certbot.renew.timer"))
+        ts_info = self._check_tailscale_key_expiry()
+        result["tailscale_key_days_remaining"] = ts_info["tailscale_key_days_remaining"]
+        result["tailscale_key_expires_on"] = ts_info["tailscale_key_expires_on"]
+
+        # 5. Format concise human-readable summaries
+        ssl_days = result["ssl_days_remaining"]
+        if result["is_up"]:
+            ssl_info = f", SSL: {ssl_days}d left" if ssl_days is not None else ""
+            result["message"] = f"🟢 Online (HTTP {result['status_code']}, {result['latency_ms']}ms{ssl_info})"
+        else:
+            err_detail = http_error_msg or "Unreachable"
+            result["message"] = f"🔴 Offline / Error: {err_detail}"
+
+        if result["duckdns_ip"]:
+            ddns_parts = [f"🟢 Active ({hostname} → {result['duckdns_ip']})"]
+            if result["duckdns_timer"] == "active":
+                ddns_parts.append("DDNS timer active")
+            if ssl_days is not None:
+                ddns_parts.append(f"TLS cert: {ssl_days}d left")
+            ddns_parts.append("No domain expiry")
+            result["duckdns_status"] = " • ".join(ddns_parts)
+        else:
+            result["duckdns_status"] = f"🔴 DNS Resolution Failed ({hostname})"
+
+        if ssl_days is not None:
+            if ssl_days >= 21:
+                cert_emoji = "🟢"
+            elif ssl_days >= 7:
+                cert_emoji = "🟡"
+            else:
+                cert_emoji = "🔴"
+            exp_date = result["ssl_expires_on"] or "unknown"
+            issuer_part = f", {result['ssl_issuer']}" if result["ssl_issuer"] else ""
+            cert_parts = [f"{cert_emoji} {ssl_days} days until expiration (expires {exp_date}{issuer_part})"]
+            if result["certbot_timer"] == "active":
+                cert_parts.append("certbot auto-renew active")
+            if result["tailscale_key_days_remaining"] is not None:
+                cert_parts.append(
+                    f"Tailscale key: {result['tailscale_key_days_remaining']}d left ({result['tailscale_key_expires_on']})"
+                )
+            elif ts_info.get("tailscale_key_disabled"):
+                cert_parts.append("Tailscale key: never expires")
+            result["cert_status"] = " • ".join(cert_parts)
+        else:
+            result["cert_status"] = "⚪ TLS certificate expiration unavailable"
 
         return result
 
@@ -922,20 +1185,34 @@ class ApiHub:
         """
         incidents = []
 
-        # 1. Website Status (DroidZero)
+        # 1. Website Status, DuckDNS, & Certificate Expirations (DroidZero)
         website = api_data.get("website", {})
         web_status = str(website.get("status", "")).lower()
-        if web_status in ("offline", "degraded", "error"):
+        if website.get("hostname") and website.get("duckdns_ip") is None:
+            incidents.append(f"Investigate DuckDNS resolution failure for {website.get('hostname')}")
+        if website.get("is_up") is False or web_status in ("offline", "degraded", "error"):
             msg = website.get("message", "Website unreachable")
             incidents.append(f"Investigate DroidZero website downtime ({msg})")
-        else:
+
+        ssl_days = website.get("ssl_days_remaining")
+        if ssl_days is None:
             ssl_days = website.get("ssl_days_left")
-            if ssl_days is not None:
-                try:
-                    if int(ssl_days) < 14:
-                        incidents.append(f"Renew DroidZero SSL certificate: expires in {ssl_days} days")
-                except (ValueError, TypeError):
-                    pass
+        if ssl_days is not None:
+            try:
+                if int(ssl_days) <= 14:
+                    exp_on = website.get("ssl_expires_on") or "soon"
+                    incidents.append(f"Renew DroidZero SSL certificate: {ssl_days} days until expiration ({exp_on})")
+            except (ValueError, TypeError):
+                pass
+
+        ts_days = website.get("tailscale_key_days_remaining")
+        if ts_days is not None:
+            try:
+                if int(ts_days) <= 14:
+                    ts_exp = website.get("tailscale_key_expires_on") or "soon"
+                    incidents.append(f"Renew or disable Tailscale node key expiry: {ts_days} days until expiration ({ts_exp})")
+            except (ValueError, TypeError):
+                pass
 
         # 2. Server Instance Health (OCI VM)
         instance = api_data.get("instance", {})
