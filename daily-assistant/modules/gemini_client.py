@@ -74,6 +74,19 @@ class GeminiClient:
             system_incidents, timeline, working_weights, mandatory_tasks, workout_history
         )
 
+    @staticmethod
+    def _resolve_mandatory_tasks(weekday_name: str, mandatory_tasks: Optional[List[str]]) -> List[str]:
+        if mandatory_tasks is not None:
+            return list(mandatory_tasks)
+        defaults = [
+            "Brush Teeth & Floss",
+            "Wash Face",
+            "Take Cholesterol Medication",
+        ]
+        if weekday_name.strip().lower() == "wednesday":
+            defaults.append("Take Vitamin D Medication")
+        return defaults
+
     def _build_prompt(
         self,
         today_str: str,
@@ -180,7 +193,7 @@ Recent Health Ledger Working Weights / PBs:
         `- [ ] [**Exercise Name**](URL) ↗ — target (Cue: cue)`
         `  - Actual: ___ lbs x ___ reps`"""
 
-        mandatory_checklist = mandatory_tasks or ["Brush Teeth & Floss", "Wash Face"]
+        mandatory_checklist = self._resolve_mandatory_tasks(weekday_name, mandatory_tasks)
         mandatory_tasks_str = "\n".join(f"- [ ] {t}" for t in mandatory_checklist)
 
         return f"""
@@ -252,7 +265,7 @@ workout_completed: false
      - Convert EVERY thought, errand, reminder, or idea from "Yesterday's Scratchpad & Tomorrow's Ideas" into an actionable checklist task `- [ ]`.
      - ACTION FROM PRIORITY EMAIL: If the priority email requires an action (e.g. paying a bill, retrieving a package with access code, confirming travel, or replying to an urgent request), ALSO create an actionable checklist item `- [ ]` here.
      - Also carry over any unfinished `- [ ]` tasks from the previous note.
-     - MANDATORY DAILY HYGIENE HABITS: Always include these daily personal hygiene items at the end of Priorities & Tasks:
+     - MANDATORY RECURRING TASKS (HYGIENE & MEDICATIONS): Always include every one of these exact checklist items verbatim at the end of Priorities & Tasks (never omit, merge, or rephrase them):
 {mandatory_tasks_str}
      - Ensure no task, idea, or system alert is lost or omitted.
    - ## 📬 Priority Email Spotlight
@@ -435,8 +448,8 @@ workout_completed: false
             elif "payment" in subj or "due" in subj or "bill" in subj:
                 tasks_md.append(f"- [ ] 💳 Action needed: {top_email.get('subject')}")
 
-        # Mandatory daily hygiene habits
-        mandatory_checklist = mandatory_tasks or ["Brush Teeth & Floss", "Wash Face"]
+        # Mandatory recurring tasks (daily hygiene & scheduled medications)
+        mandatory_checklist = self._resolve_mandatory_tasks(weekday_name, mandatory_tasks)
         for m_task in mandatory_checklist:
             tasks_md.append(f"- [ ] {m_task}")
 

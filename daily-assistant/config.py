@@ -14,7 +14,7 @@ except ImportError:
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
-from typing import Optional
+from typing import Dict, List, Optional
 
 # Base paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -116,5 +116,28 @@ PROGRAM_START_DATE = date.fromisoformat(os.getenv("PROGRAM_START_DATE", "2026-09
 # Mandatory Daily Recurring Tasks (appended to every daily note's priorities)
 MANDATORY_DAILY_TASKS = [
     "Brush Teeth & Floss",
-    "Wash Face"
+    "Wash Face",
+    "Take Cholesterol Medication",
 ]
+
+# Weekday-Specific Recurring Tasks (Python date.weekday(): 0=Monday .. 6=Sunday)
+WEEKLY_MANDATORY_TASKS: Dict[int, List[str]] = {
+    2: [  # Wednesday
+        "Take Vitamin D Medication",
+    ],
+}
+
+def get_mandatory_tasks_for_date(target_date: date) -> List[str]:
+    """Returns all mandatory daily and weekday-specific tasks for target_date."""
+    tasks = list(MANDATORY_DAILY_TASKS)
+    tasks.extend(WEEKLY_MANDATORY_TASKS.get(target_date.weekday(), []))
+    return tasks
+
+def get_all_recurring_tasks() -> List[str]:
+    """Returns all configured daily and weekday-specific recurring tasks."""
+    tasks = list(MANDATORY_DAILY_TASKS)
+    for day_tasks in WEEKLY_MANDATORY_TASKS.values():
+        for task in day_tasks:
+            if task not in tasks:
+                tasks.append(task)
+    return tasks

@@ -3,7 +3,7 @@
 Test script to verify Google Calendar integration and task rollover protection in daily-assistant.
 """
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -183,9 +183,160 @@ END:VCALENDAR"""
     assert lap_swim["calendar"] == "Home"
     print("✅ ApiHub._parse_ics_feed tests passed successfully!")
 
+def test_mandatory_tasks_schedule():
+    print("Testing mandatory daily and Wednesday-only medication schedule...")
+    monday = date(2026, 11, 16)
+    for offset in range(7):
+        day = monday + timedelta(days=offset)
+        tasks = config.get_mandatory_tasks_for_date(day)
+        assert "Brush Teeth & Floss" in tasks, f"Missing hygiene task on {day}"
+        assert "Wash Face" in tasks, f"Missing Wash Face on {day}"
+        assert "Take Cholesterol Medication" in tasks, f"Missing Cholesterol Medication on {day}"
+        if day.weekday() == 2:  # Wednesday (2026-11-18)
+            assert "Take Vitamin D Medication" in tasks, f"Missing Vitamin D Medication on Wednesday {day}"
+        else:
+            assert "Take Vitamin D Medication" not in tasks, f"Unexpected Vitamin D Medication on non-Wednesday {day}"
+
+    all_recurring = config.get_all_recurring_tasks()
+    for expected in [
+        "Brush Teeth & Floss",
+        "Wash Face",
+        "Take Cholesterol Medication",
+        "Take Vitamin D Medication",
+    ]:
+        assert expected in all_recurring, f"Missing '{expected}' in get_all_recurring_tasks()"
+    assert len(all_recurring) == len(set(all_recurring)), "get_all_recurring_tasks() must deduplicate tasks"
+    print("✅ Mandatory tasks schedule test passed successfully!")
+
+
+def test_medication_rollover_protection():
+    print("Testing NoteParser medication rollover protection...")
+    sample_content = """---
+date: 2026-11-18
+tags: [daily-note]
+type: daily-note
+---
+
+# 📅 Daily Plan: Wednesday, 2026-11-18
+
+## 🎯 To-do
+
+### 📅 Today's Schedule
+*No scheduled calendar events today.*
+
+### 📋 Priorities & Tasks
+- [ ] Pick up cholesterol prescription from pharmacy
+- [ ] Refill Vitamin D prescription
+- [ ] Brush Teeth & Floss
+- [ ] Wash Face
+- [ ] Take Cholesterol Medication
+- [ ] Take Vitamin D Medication
+- [ ] 💊 **Take Cholesterol Medication**
+- [ ] Take weekly Vitamin D
+"""
+    test_file = SCRIPT_DIR / "sample_med_rollover_note.md"
+    test_file.write_text(sample_content, encoding="utf-8")
+
+    try:
+        for parser in (
+            NoteParser(SCRIPT_DIR),
+            NoteParser(SCRIPT_DIR, recurring_tasks=config.get_all_recurring_tasks()),
+        ):
+            parsed = parser.parse_note_content(test_file)
+            incomplete = parsed["incomplete_tasks"]
+            assert "Pick up cholesterol prescription from pharmacy" in incomplete, "Should roll over cholesterol pharmacy errand"
+            assert "Refill Vitamin D prescription" in incomplete, "Should roll over Vitamin D refill errand"
+            assert "Brush Teeth & Floss" not in incomplete, "Should NOT roll over Brush Teeth & Floss"
+            assert "Wash Face" not in incomplete, "Should NOT roll over Wash Face"
+            assert "Take Cholesterol Medication" not in incomplete, "Should NOT roll over daily Cholesterol Medication"
+            assert "Take Vitamin D Medication" not in incomplete, "Should NOT roll over Wednesday Vitamin D Medication"
+            assert "💊 **Take Cholesterol Medication**" not in incomplete, "Should NOT roll over formatted Cholesterol Medication"
+            assert "Take weekly Vitamin D" not in incomplete, "Should NOT roll over weekly Vitamin D variant"
+    finally:
+        if test_file.exists():
+            test_file.unlink()
+
+    print("✅ NoteParser medication rollover protection test passed successfully!")
+
+
+def test_wednesday_vs_non_wednesday_generation():
+    print("Testing Wednesday vs non-Wednesday note generation & prompt building...")
+    client = GeminiClient(api_key="", model_name="gemini-2.5-flash")
+    prev_data = {"incomplete_tasks": ["Ship feature"], "scratchpad_notes": []}
+    workout_data = {
+        "title": "Full Body Strength A",
+        "category": "Strength",
+        "goal": "Build foundation",
+        "exercises": [],
+        "desk_mobility": "Cat-cow stretch",
+    }
+    api_data = {
+        "website": {"message": "🟢 Online (HTTP 200)"},
+        "instance": {"load_avg": "0.10, 0.10, 0.10", "disk_free_gb": "80.0 GB"},
+        "weather": {"summary": "45°F • Clear"},
+        "markets": [{"display": "**VOO**: $680.00 (🟢 +0.50%)"}],
+        "gmail": {"status": "🟢 0 unread"},
+        "calendar": {"calendar_lines": [], "status": "🟢 0 events"},
+    }
+
+    wednesday = date(2026, 11, 18)
+    thursday = date(2026, 11, 19)
+
+    for explicit_tasks in (True, False):
+        wed_tasks = config.get_mandatory_tasks_for_date(wednesday) if explicit_tasks else None
+        thu_tasks = config.get_mandatory_tasks_for_date(thursday) if explicit_tasks else None
+
+        wed_prompt = client._build_prompt(
+            today_str=wednesday.strftime("%Y-%m-%d"),
+            weekday_name=wednesday.strftime("%A"),
+            prev=prev_data,
+            workout=workout_data,
+            apis=api_data,
+            mandatory_tasks=wed_tasks,
+        )
+        thu_prompt = client._build_prompt(
+            today_str=thursday.strftime("%Y-%m-%d"),
+            weekday_name=thursday.strftime("%A"),
+            prev=prev_data,
+            workout=workout_data,
+            apis=api_data,
+            mandatory_tasks=thu_tasks,
+        )
+
+        assert "- [ ] Take Cholesterol Medication" in wed_prompt
+        assert "- [ ] Take Vitamin D Medication" in wed_prompt
+        assert "- [ ] Take Cholesterol Medication" in thu_prompt
+        assert "Take Vitamin D Medication" not in thu_prompt
+
+        wed_note = client.generate_daily_note(
+            today=wednesday,
+            previous_note_data=prev_data,
+            workout_data=workout_data,
+            api_data=api_data,
+            mandatory_tasks=wed_tasks,
+        )
+        thu_note = client.generate_daily_note(
+            today=thursday,
+            previous_note_data=prev_data,
+            workout_data=workout_data,
+            api_data=api_data,
+            mandatory_tasks=thu_tasks,
+        )
+
+        assert "- [ ] Take Cholesterol Medication" in wed_note
+        assert "- [ ] Take Vitamin D Medication" in wed_note
+        assert "- [ ] Take Cholesterol Medication" in thu_note
+        assert "Take Vitamin D Medication" not in thu_note
+
+    print("✅ Wednesday vs non-Wednesday generation test passed successfully!")
+
+
 if __name__ == "__main__":
     test_note_parser_rollover()
     test_deterministic_generation_with_calendar()
     test_parse_ics_feed()
+    test_mandatory_tasks_schedule()
+    test_medication_rollover_protection()
+    test_wednesday_vs_non_wednesday_generation()
     print("\n🎉 All tests passed!")
 

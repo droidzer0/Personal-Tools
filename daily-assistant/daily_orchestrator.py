@@ -43,7 +43,7 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
             print(f"    Notice: Pre-orchestration LiveSync pull encountered: {e}")
 
     # 1. Initialize modules
-    parser = NoteParser(config.DAILY_DIR)
+    parser = NoteParser(config.DAILY_DIR, recurring_tasks=config.get_all_recurring_tasks())
     workout_engine = WorkoutEngine(config.USER_PROFILE)
     api_hub = ApiHub(
         config.DROIDZERO_URL,
@@ -198,6 +198,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
             print(f"       - {inc}")
 
     # 5. Synthesize note via Gemini (or fallback template)
+    mandatory_tasks = config.get_mandatory_tasks_for_date(target_date)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Recurring Tasks ({target_date.strftime('%A')}): {', '.join(mandatory_tasks)}")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] ✨ Formatting note via Gemini ({config.GEMINI_MODEL})...")
     note_content = gemini_client.generate_daily_note(
         today=target_date,
@@ -207,7 +209,7 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         system_incidents=system_incidents,
         timeline=timeline,
         working_weights=working_weights,
-        mandatory_tasks=config.MANDATORY_DAILY_TASKS,
+        mandatory_tasks=mandatory_tasks,
         workout_history=workout_history
     )
 

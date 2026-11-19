@@ -4,8 +4,50 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 class NoteParser:
-    def __init__(self, daily_dir: Path):
+    def __init__(self, daily_dir: Path, recurring_tasks: Optional[List[str]] = None):
         self.daily_dir = daily_dir
+        self.recurring_tasks: List[str] = list(recurring_tasks) if recurring_tasks else []
+        self._normalized_recurring_tasks = {
+            self._normalize_task_text(t) for t in self.recurring_tasks if t
+        }
+
+    @staticmethod
+    def _normalize_task_text(text: str) -> str:
+        """Normalizes a task string by stripping markdown, leading icons/punctuation, and extra whitespace."""
+        cleaned = re.sub(r'[*_`]+', '', text)
+        cleaned = re.sub(r'^[^a-zA-Z0-9]+', '', cleaned)
+        return re.sub(r'\s+', ' ', cleaned).strip().lower()
+
+    def _is_recurring_task(self, task_text: str) -> bool:
+        """Returns True if task_text matches a daily or weekly recurring habit/medication."""
+        normalized = self._normalize_task_text(task_text)
+        if normalized in self._normalized_recurring_tasks:
+            return True
+
+        if any(h in task_text.lower() for h in ["brush teeth", "wash face", "floss"]):
+            return True
+
+        if normalized in (
+            "take cholesterol medication",
+            "cholesterol medication",
+            "take vitamin d medication",
+            "vitamin d medication",
+        ):
+            return True
+
+        if re.search(
+            r'^take\s+(?:my\s+|daily\s+)?cholesterol\s+med(?:ication|s)?(?:\s*\([^)]*\))?$',
+            normalized,
+        ):
+            return True
+
+        if re.search(
+            r'^take\s+(?:my\s+|weekly\s+)?vitamin\s*d(?:\s+(?:med(?:ication|s)?|supplement|pill))?(?:\s*\([^)]*\))?$',
+            normalized,
+        ):
+            return True
+
+        return False
 
     def get_note_path_for_date(self, note_date: date) -> Optional[Path]:
         """
@@ -133,8 +175,7 @@ class NoteParser:
                     "all day" in task_text.lower() or
                     bool(re.search(r'\b\d{1,2}:\d{2}\s*(?:am|pm)\b', task_text, re.IGNORECASE))
                 )
-                recurring_hygiene = any(h in task_text.lower() for h in ["brush teeth", "wash face", "floss"])
-                if not in_workout and not is_calendar_event and not recurring_hygiene:
+                if not in_workout and not is_calendar_event and not self._is_recurring_task(task_text):
                     incomplete_tasks.append(task_text)
                 elif in_workout:
                     current_exercise = self._extract_exercise_name(task_text)
