@@ -6,6 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
+# Prune daily assistant logs older than 30 days.
+find "${LOG_DIR}" -maxdepth 1 -type f -name 'daily_*.log' -mtime +30 -delete 2>/dev/null || true
+
 LOG_FILE="${LOG_DIR}/daily_$(date +'%Y-%m-%d').log"
 exec >> "${LOG_FILE}" 2>&1
 
@@ -13,14 +16,7 @@ echo "=================================================="
 echo "Daily Assistant Run Started at $(date)"
 echo "=================================================="
 
-# Optional: If running on OCI with livesync-cli, pull latest updates from CouchDB
-if command -v livesync-cli &> /dev/null; then
-    echo "Syncing latest notes from CouchDB via livesync-cli..."
-    livesync-cli sync || true
-    livesync-cli mirror /data || true
-fi
-
-# Run the Python orchestrator
+# Run the Python orchestrator (handles consolidated LiveSync pre-pull & post-push batches)
 if [ -f "${SCRIPT_DIR}/venv/bin/python3" ]; then
     PYTHON_BIN="${SCRIPT_DIR}/venv/bin/python3"
 else
@@ -28,15 +24,7 @@ else
 fi
 
 echo "Executing daily orchestrator using ${PYTHON_BIN}..."
-"${PYTHON_BIN}" "${SCRIPT_DIR}/daily_orchestrator.py"
-
-# Optional: Push newly created note back into CouchDB
-if command -v livesync-cli &> /dev/null; then
-    TODAY_NOTE="Daily/$(date +'%Y')/$(date +'%B')/$(date +'%Y-%m-%d').md"
-    echo "Pushing newly created note to CouchDB via livesync-cli..."
-    livesync-cli push "/data/${TODAY_NOTE}" "${TODAY_NOTE}" || true
-    livesync-cli sync || true
-fi
+"${PYTHON_BIN}" "${SCRIPT_DIR}/daily_orchestrator.py" "$@"
 
 echo "Daily Assistant Run Completed Successfully at $(date)"
 echo "=================================================="

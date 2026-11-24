@@ -621,6 +621,120 @@ type: daily-note
     print("✅ Backup token rendering and rollover dedup tests passed successfully!")
 
 
+def test_phase4_oci_ops_pulse_and_batch():
+    print("Testing Phase 4 OCI telemetry pulse, backup checks, shared SSL, and LiveSync batching...")
+    import json
+    import sqlite3
+    import daily_orchestrator
+    from modules.api_hub import ApiHub, get_ssl_context
+    from modules.gemini_client import get_ssl_context as gemini_ssl
+    from modules.notifier import _get_ssl_context as notifier_ssl
+
+    # 1. Shared verified SSL context helper
+    assert get_ssl_context is gemini_ssl
+    assert get_ssl_context is notifier_ssl
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db_path = tmp / "votes.db"
+        now_utc = datetime(2026, 11, 24, 11, 0, 0)
+        recent_str = "2026-11-24 09:00:00"
+        old_str = "2026-11-20 09:00:00"
+
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE site_visits (id INTEGER PRIMARY KEY, visited_at TEXT, visitor_hash TEXT)")
+        conn.execute("INSERT INTO site_visits (visited_at, visitor_hash) VALUES (?, 'v1')", (recent_str,))
+        conn.execute("INSERT INTO site_visits (visited_at, visitor_hash) VALUES (?, 'v1')", (recent_str,))
+        conn.execute("INSERT INTO site_visits (visited_at, visitor_hash) VALUES (?, 'v2')", (recent_str,))
+        conn.execute("INSERT INTO site_visits (visited_at, visitor_hash) VALUES (?, 'old')", (old_str,))
+        conn.execute("CREATE TABLE vote_log (id INTEGER PRIMARY KEY, photo_id TEXT, voted_at TEXT)")
+        conn.execute("INSERT INTO vote_log (photo_id, voted_at) VALUES ('01', ?)", (recent_str,))
+        conn.execute("INSERT INTO vote_log (photo_id, voted_at) VALUES ('02', ?)", (old_str,))
+        conn.execute("CREATE TABLE photo_votes (photo_id TEXT PRIMARY KEY, vote_count INTEGER)")
+        conn.execute("INSERT INTO photo_votes VALUES ('01', 12)")
+        conn.execute("CREATE TABLE contact_submissions (id INTEGER PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO contact_submissions (status) VALUES ('received')")
+        conn.execute("INSERT INTO contact_submissions (status) VALUES ('replied')")
+        conn.execute("CREATE TABLE subscribers (id INTEGER PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO subscribers (status) VALUES ('active')")
+        conn.execute("INSERT INTO subscribers (status) VALUES ('active')")
+        conn.execute("INSERT INTO subscribers (status) VALUES ('pending')")
+        conn.commit()
+        conn.close()
+
+        status_dir = tmp / "backups"
+        status_dir.mkdir()
+        (status_dir / "backup-status.json").write_text(json.dumps({
+            "ok": True,
+            "checked_at": "2026-11-24T09:30:00Z",
+            "pushed": True,
+        }), encoding="utf-8")
+        (status_dir / "vault-backup-status.json").write_text(json.dumps({
+            "ok": True,
+            "checked_at": "2026-11-24T09:45:00Z",
+            "uploaded_offbox": True,
+            "pending_par_setup": False,
+        }), encoding="utf-8")
+
+        hub = ApiHub(
+            droidzero_url="https://droidzero.duckdns.org",
+            gmail_creds_path=tmp / "creds.json",
+            gmail_tokens_dir=tmp,
+            droidzero_db_path=db_path,
+            backup_status_dir=status_dir,
+        )
+        pulse = hub.get_droidzero_pulse(now_utc=now_utc)
+        assert pulse["available"] is True
+        assert pulse["views_24h"] == 3
+        assert pulse["unique_visitors_24h"] == 2
+        assert pulse["likes_24h"] == 1
+        assert pulse["total_likes"] == 12
+        assert pulse["unread_contacts"] == 1
+        assert pulse["active_subscribers"] == 2
+        assert pulse["pending_subscribers"] == 1
+        assert "3 views (2 unique)" in pulse["summary"]
+        assert "1 unread contact" in pulse["summary"]
+
+        with patch.object(ApiHub, "_inspect_docker_containers", return_value={
+            "adguard": {"running": True, "health": "healthy", "ok": True},
+            "uptime-kuma": {"running": True, "health": "healthy", "ok": True},
+            "couchdb": {"running": False, "health": "unhealthy", "ok": False},
+        }):
+            ops = hub.get_oci_containers_and_backups(now_utc=now_utc)
+        assert ops["unhealthy_containers"] == ["couchdb (unhealthy)"]
+        assert ops["git_backup_ok"] is True
+        assert ops["vault_backup_ok"] is True
+        assert "Git backup: 1.5h ago" in ops["summary"]
+        assert "Vault OCI: 1.2h ago" in ops["summary"]
+
+        incidents = ApiHub.extract_system_incidents({"oci_ops": ops, "droidzero_pulse": pulse})
+        assert any("unhealthy OCI container" in x and "couchdb" in x for x in incidents)
+        assert any("1 unread DroidZero contact message" in x for x in incidents)
+
+        # Rollover dedup covers new daily operational incidents
+        note_fp = tmp / "2026-11-24.md"
+        note_fp.write_text(
+            "## 🎯 To-do\n### 📋 Priorities & Tasks\n"
+            "- [ ] 🚨 Investigate unhealthy OCI container(s): couchdb (unhealthy)\n"
+            "- [ ] ⚠️ Reply to 1 unread DroidZero contact message in Admin Studio\n"
+            "- [ ] Real user task\n",
+            encoding="utf-8",
+        )
+        parsed = NoteParser(tmp, recurring_tasks=config.get_all_recurring_tasks()).parse_note_content(note_fp)
+        assert parsed["incomplete_tasks"] == ["Real user task"]
+
+    # LiveSync batch args include Finance Dashboard only on weekdays
+    pre_wkday = daily_orchestrator.build_livesync_pre_pull_args(date(2026, 11, 24))
+    post_wkday = daily_orchestrator.build_livesync_post_push_args(date(2026, 11, 24))
+    pre_wknd = daily_orchestrator.build_livesync_pre_pull_args(date(2026, 11, 28))
+    post_wknd = daily_orchestrator.build_livesync_post_push_args(date(2026, 11, 28))
+    assert "Life Dashboard/Finance/Finance Dashboard.md" in pre_wkday
+    assert "Life Dashboard/Finance/Finance Dashboard.md" in post_wkday
+    assert "Life Dashboard/Finance/Finance Dashboard.md" not in pre_wknd
+    assert "Life Dashboard/Finance/Finance Dashboard.md" not in post_wknd
+    print("✅ Phase 4 OCI telemetry, pulse, SSL, and batch tests passed!")
+
+
 if __name__ == "__main__":
     test_note_parser_rollover()
     test_deterministic_generation_with_calendar()
@@ -631,5 +745,6 @@ if __name__ == "__main__":
     test_github_token_expiration_parsing()
     test_backup_token_tracker_and_incidents()
     test_backup_token_rendered_and_rollover_dedup()
+    test_phase4_oci_ops_pulse_and_batch()
     print("\n🎉 All tests passed!")
 

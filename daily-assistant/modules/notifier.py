@@ -5,26 +5,13 @@ Zero external dependencies (uses standard urllib.request).
 """
 
 import json
-import ssl
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import date
 from typing import Dict, Any, Optional
 
-def _get_ssl_context():
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        pass
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
-    except Exception:
-        return ssl._create_unverified_context()
+from modules.api_hub import get_ssl_context as _get_ssl_context
 
 class Notifier:
     def __init__(

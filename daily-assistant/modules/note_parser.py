@@ -51,9 +51,17 @@ class NoteParser:
 
     @staticmethod
     def _is_generated_expiry_alert(task_text: str) -> bool:
-        """Returns True for auto-generated system expiration countdown alerts that regenerate daily."""
+        """Returns True for auto-generated system countdown/health alerts that regenerate daily."""
         return bool(re.match(
-            r'^(?:⚠️|🚨)\s*(?:Rotate DroidZero backup GitHub token|Renew DroidZero SSL certificate|Renew or disable Tailscale node key expiry)\b',
+            r'^(?:⚠️|🚨)\s*(?:'
+            r'Rotate DroidZero backup GitHub token'
+            r'|Renew DroidZero SSL certificate'
+            r'|Renew or disable Tailscale node key expiry'
+            r'|Investigate unhealthy OCI container'
+            r'|Investigate DroidZero nightly Git backup'
+            r'|Investigate OCI Vault snapshot backup'
+            r'|Reply to \d+ unread DroidZero contact message'
+            r')\b',
             task_text.strip(),
         ))
 

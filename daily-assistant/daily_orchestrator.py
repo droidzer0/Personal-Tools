@@ -6,8 +6,11 @@ Stateless, autonomous batch script that prepares your daily Obsidian note.
 
 import sys
 import argparse
-from datetime import date, datetime
+import shutil
+import subprocess
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import List
 
 # Add script directory to sys.path
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -22,25 +25,57 @@ from modules.gemini_client import GeminiClient
 from modules.notifier import Notifier
 from modules.quotes import get_daily_quote
 
+def build_livesync_pre_pull_args(target_date: date) -> List[str]:
+    """Builds consolidated pre-run LiveSync commands (1 Docker invocation)."""
+    yesterday = target_date - timedelta(days=1)
+    y_rel = config.get_daily_note_rel_path(yesterday)
+    flat_rel = f"Daily/{yesterday.strftime('%Y-%m-%d')}.md"
+    health_rel = "Life Dashboard/Health/Health & Fitness.md"
+    args = [
+        "sync",
+        "--", "?pull", y_rel, f"/data/{y_rel}",
+        "--", "?pull", flat_rel, f"/data/{flat_rel}",
+        "--", "?pull", health_rel, f"/data/{health_rel}",
+    ]
+    if target_date.weekday() < 5:
+        finance_rel = "Life Dashboard/Finance/Finance Dashboard.md"
+        args.extend(["--", "?pull", finance_rel, f"/data/{finance_rel}"])
+    return args
+
+
+def build_livesync_post_push_args(target_date: date) -> List[str]:
+    """Builds consolidated post-run LiveSync commands (1 Docker invocation)."""
+    today_rel = config.get_daily_note_rel_path(target_date)
+    health_rel = "Life Dashboard/Health/Health & Fitness.md"
+    args = [
+        "push", f"/data/{today_rel}", today_rel,
+        "--", "?push", f"/data/{health_rel}", health_rel,
+    ]
+    if target_date.weekday() < 5:
+        finance_rel = "Life Dashboard/Finance/Finance Dashboard.md"
+        args.extend(["--", "?push", f"/data/{finance_rel}", finance_rel])
+    args.extend(["--", "sync"])
+    return args
+
+
+def _run_livesync_batch(batch_args: List[str], timeout: int = 90) -> bool:
+    """Executes consolidated livesync-cli commands inside one container if available."""
+    cli = shutil.which("livesync-cli")
+    if not cli:
+        return False
+    res = subprocess.run([cli, "batch", *batch_args], timeout=timeout, check=False)
+    return res.returncode == 0
+
+
 def run_orchestration(target_date: date, dry_run: bool = False, force: bool = False):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 Starting Daily Assistant Orchestrator for {target_date}...")
     
-    # 0. Sync and pull latest previous note from CouchDB if on OCI VM with livesync-cli
-    import shutil
-    import subprocess
-    from datetime import timedelta
+    # 0. Consolidated pre-run pull from CouchDB via a single livesync-cli batch container
     if shutil.which("livesync-cli") and not dry_run:
         try:
-            subprocess.run(["livesync-cli", "sync"], timeout=30, check=False)
-            yesterday = target_date - timedelta(days=1)
-            rel_path = config.get_daily_note_rel_path(yesterday)
-            subprocess.run(["livesync-cli", "pull", rel_path, f"/data/{rel_path}"], timeout=15, check=False)
-            flat_rel_path = f"Daily/{yesterday.strftime('%Y-%m-%d')}.md"
-            subprocess.run(["livesync-cli", "pull", flat_rel_path, f"/data/{flat_rel_path}"], timeout=15, check=False)
-            health_rel = "Life Dashboard/Health/Health & Fitness.md"
-            subprocess.run(["livesync-cli", "pull", health_rel, f"/data/{health_rel}"], timeout=15, check=False)
+            _run_livesync_batch(build_livesync_pre_pull_args(target_date), timeout=90)
         except Exception as e:
-            print(f"    Notice: Pre-orchestration LiveSync pull encountered: {e}")
+            print(f"    Notice: Pre-orchestration LiveSync batch encountered: {e}")
 
     # 1. Initialize modules
     parser = NoteParser(config.DAILY_DIR, recurring_tasks=config.get_all_recurring_tasks())
@@ -52,6 +87,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         droidzero_env_path=config.DROIDZERO_ENV_PATH,
         backup_github_repo=config.BACKUP_GITHUB_REPO,
         backup_token_expires_on=config.BACKUP_TOKEN_EXPIRES_ON,
+        droidzero_db_path=config.DROIDZERO_DB_PATH,
+        backup_status_dir=config.BACKUP_STATUS_DIR,
     )
     gemini_client = GeminiClient(
         config.GEMINI_API_KEY,
@@ -154,6 +191,12 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     instance_health = api_hub.get_instance_health()
     print(f"    Instance Load: {instance_health['load_avg']} | Free Disk: {instance_health['disk_free_gb']}")
 
+    oci_ops = api_hub.get_oci_containers_and_backups()
+    print(f"    OCI Ops:   {oci_ops['summary']}")
+
+    droidzero_pulse = api_hub.get_droidzero_pulse()
+    print(f"    Pulse 24h: {droidzero_pulse['summary']}")
+
     weather = api_hub.get_chicago_weather()
     print(f"    Chicago Weather: {weather['summary']}")
 
@@ -187,6 +230,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     api_data = {
         "website": website_status,
         "instance": instance_health,
+        "oci_ops": oci_ops,
+        "droidzero_pulse": droidzero_pulse,
         "weather": weather,
         "markets": markets,
         "gmail": gmail_triage,
@@ -243,23 +288,17 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     # Optional: Update Finance Dashboard with current market prices (weekdays only)
     if target_date.weekday() < 5:
         try:
-            update_finance_watchlist(config.FINANCE_FILE, markets)
+            update_finance_watchlist(config.FINANCE_FILE, markets, target_date=target_date)
         except Exception as e:
             print(f"    Notice: Could not auto-update Finance Dashboard table ({e})")
 
-    # 7. Push and Sync to CouchDB (if on OCI VM with livesync-cli) before notifying
-    import shutil
-    import subprocess
+    # 7. Consolidated push + sync to CouchDB before dispatching ntfy notification
     if shutil.which("livesync-cli"):
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Pushing newly created note and Health Dashboard to CouchDB via livesync-cli...")
-            rel_path = config.get_daily_note_rel_path(target_date)
-            subprocess.run(["livesync-cli", "push", f"/data/{rel_path}", rel_path], timeout=30, check=False)
-            health_rel = "Life Dashboard/Health/Health & Fitness.md"
-            subprocess.run(["livesync-cli", "push", f"/data/{health_rel}", health_rel], timeout=30, check=False)
-            subprocess.run(["livesync-cli", "sync"], timeout=30, check=False)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Pushing newly created note and dashboards to CouchDB via livesync-cli batch...")
+            _run_livesync_batch(build_livesync_post_push_args(target_date), timeout=90)
         except Exception as e:
-            print(f"    Notice: livesync-cli push/sync prior to notification encountered: {e}")
+            print(f"    Notice: livesync-cli batch push/sync prior to notification encountered: {e}")
 
     # 8. Dispatch push notification via ntfy (if enabled)
     if config.NTFY_ENABLED and config.NTFY_TOPIC:
@@ -283,13 +322,13 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 Complete! Note is ready for Obsidian LiveSync.\n")
 
-def update_finance_watchlist(finance_file: Path, markets: list):
+def update_finance_watchlist(finance_file: Path, markets: list, target_date: date = None):
     """Updates the Finance Dashboard table with freshly polled prices."""
     if not finance_file.exists() or not markets:
         return
 
     content = finance_file.read_text(encoding="utf-8")
-    today_str = date.today().strftime("%Y-%m-%d")
+    today_str = (target_date or date.today()).strftime("%Y-%m-%d")
 
     for item in markets:
         symbol = item.get("symbol")

@@ -4,6 +4,35 @@ if [ -t 0 ]; then
     DOCKER_FLAGS+=(-it)
 fi
 
+if [ "${1:-}" = "batch" ]; then
+    shift
+    exec docker run "${DOCKER_FLAGS[@]}" --rm --network host \
+        -v /opt/obsidian-vault:/data \
+        --entrypoint node \
+        livesync-cli -e '
+const { spawnSync } = require("child_process");
+const dbPath = process.env.LIVESYNC_DB_PATH || "/data";
+const cmds = [];
+let cur = [];
+for (const a of process.argv.slice(2)) {
+  if (a === "--") {
+    if (cur.length) { cmds.push(cur); cur = []; }
+  } else {
+    cur.push(a);
+  }
+}
+if (cur.length) cmds.push(cur);
+for (const raw of cmds) {
+  const optional = raw[0].startsWith("?");
+  const cmd = optional ? [raw[0].slice(1), ...raw.slice(1)] : raw;
+  const res = spawnSync(process.execPath, ["/app/dist/index.cjs", dbPath, ...cmd], { stdio: "inherit" });
+  if (res.status !== 0 && !optional) {
+    process.exit(res.status || 1);
+  }
+}
+' __BATCH__ "$@"
+fi
+
 exec docker run "${DOCKER_FLAGS[@]}" --rm --network host \
     -v /opt/obsidian-vault:/data \
     livesync-cli "$@"

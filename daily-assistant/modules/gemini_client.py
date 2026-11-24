@@ -1,25 +1,12 @@
 import os
 import json
-import ssl
 import time
 import urllib.request
 import urllib.error
 from datetime import date
 from typing import Dict, List, Optional, Any
 
-def get_ssl_context():
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        pass
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
-    except Exception:
-        return ssl._create_unverified_context()
+from modules.api_hub import get_ssl_context
 
 class GeminiClient:
     def __init__(self, api_key: str, model_name: str = "gemini-3.5-flash"):
@@ -218,6 +205,8 @@ Input Data:
 - DuckDNS (droidzero.duckdns.org): {apis.get('website', {}).get('duckdns_status', '🟢 Active')}
 - SSL/TLS Certificates: {apis.get('website', {}).get('cert_status', '🟢 Valid')}
 - GitHub Backup Token (`backup-token`): {apis.get('website', {}).get('backup_token_status', '⚪ Unavailable')}
+- OCI Containers & Backups: {apis.get('oci_ops', {}).get('summary', '⚪ Unavailable on local run')}
+- DroidZero Pulse (24h): {apis.get('droidzero_pulse', {}).get('summary', '⚪ Unavailable on local run')}
 - Server Instance Load: {apis.get('instance', {}).get('load_avg', 'Normal')} | Disk Free: {apis.get('instance', {}).get('disk_free_gb', 'N/A')}
 - Chicago Weather: {apis.get('weather', {}).get('summary', 'Seasonal')}
 - Gmail Triage: {apis.get('gmail', {}).get('status', 'Ready')}
@@ -288,6 +277,8 @@ workout_completed: false
        - **🦆 DuckDNS (`droidzero.duckdns.org`)**: Exact DuckDNS resolution IP, dynamic DNS timer/renewal status, SSL countdown, and domain expiration status from Input Data
        - **🔒 SSL/TLS Certificates**: Exact days until expiration (`X days until expiration`), expiration date (`YYYY-MM-DD`), issuer, and Tailscale key expiry status if present in Input Data
        - **🔑 GitHub Backup Token**: Exact days until expiration (`X days until expiration`), expiration date (`YYYY-MM-DD`), and backup timer status from Input Data
+       - **🐳 OCI Containers & Backups**: Exact container health (`adguard`, `uptime-kuma`, `couchdb`) and Git/Vault backup freshness from Input Data
+       - **📈 DroidZero Pulse (24h)**: Exact 24h site views, uniques, photo likes, active/pending subscribers, and unread contact messages from Input Data
        - **🖥️ OCI Instance**: VM load averages and free disk space
        - **📧 Gmail Inboxes**: Unread triage counts across accounts
        - **📅 Google Calendar**: Today's event count and sync status
@@ -611,6 +602,8 @@ workout_completed: false
 | **🦆 DuckDNS (`droidzero.duckdns.org`)** | {duckdns_status} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **🔒 SSL/TLS Certificates** | {cert_status} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **🔑 GitHub Backup Token** | {backup_token_status} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
+| **🐳 OCI Containers & Backups** | {apis.get('oci_ops', {}).get('summary', '⚪ Local checks skipped (runs on OCI host)')} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
+| **📈 DroidZero Pulse (24h)** | {apis.get('droidzero_pulse', {}).get('summary', '⚪ Local DB unavailable (runs on OCI host)')} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **🖥️ OCI Instance** | Load: `{apis.get('instance', {}).get('load_avg', 'N/A')}` • Disk Free: `{apis.get('instance', {}).get('disk_free_gb', 'N/A')}` | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **📧 Gmail Inboxes** | {apis.get('gmail', {}).get('status', 'Ready')} | [[Subscriptions Report|Subscriptions]] |
 | **📅 Google Calendar** | {cal_data.get('status', 'Ready')} | [[Dashboard|Command Center]] |

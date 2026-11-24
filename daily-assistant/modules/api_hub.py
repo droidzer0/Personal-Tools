@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import sqlite3
 import ssl
 import socket
 import subprocess
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 def get_ssl_context():
-    """Returns an SSL context that works reliably across macOS and Linux environments."""
+    """Returns a verified SSL context across macOS and Linux environments."""
     try:
         import certifi
         return ssl.create_default_context(cafile=certifi.where())
@@ -29,10 +30,7 @@ def get_ssl_context():
             except Exception:
                 pass
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
+        return ssl.create_default_context()
     except Exception:
         return ssl._create_unverified_context()
 
@@ -152,12 +150,20 @@ class ApiHub:
         droidzero_env_path: Optional[Path] = None,
         backup_github_repo: str = "droidzer0/droidzero-backups",
         backup_token_expires_on: str = "",
+        droidzero_db_path: Optional[Path] = None,
+        backup_status_dir: Optional[Path] = None,
     ):
         self.droidzero_url = droidzero_url
         self.gmail_creds_path = gmail_creds_path
         self.gmail_tokens_dir = gmail_tokens_dir
         self.droidzero_env_path = (
             droidzero_env_path if droidzero_env_path is not None else Path("/opt/droidzero-api/.env")
+        )
+        self.droidzero_db_path = (
+            droidzero_db_path if droidzero_db_path is not None else Path("/opt/droidzero-api/votes.db")
+        )
+        self.backup_status_dir = (
+            backup_status_dir if backup_status_dir is not None else Path("/var/lib/droidzero-backups")
         )
         self.backup_github_repo = (backup_github_repo or "droidzer0/droidzero-backups").strip()
         self.backup_token_expires_on = (backup_token_expires_on or "").strip()
@@ -586,6 +592,262 @@ class ApiHub:
             pass
 
         return metrics
+
+    @staticmethod
+    def _parse_iso_utc(raw_value: Optional[str]) -> Optional[datetime.datetime]:
+        if not raw_value or not isinstance(raw_value, str):
+            return None
+        try:
+            cleaned = raw_value.strip()
+            if cleaned.endswith("Z"):
+                cleaned = cleaned[:-1] + "+00:00"
+            dt = datetime.datetime.fromisoformat(cleaned)
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.astimezone(datetime.timezone.utc)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _inspect_docker_containers(names: Tuple[str, ...]) -> Optional[Dict[str, Dict[str, Any]]]:
+        """Inspect container running/health state via one docker inspect subprocess."""
+        if not sys.platform.startswith("linux"):
+            return None
+        try:
+            proc = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.Name}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+                    *names,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=4,
+            )
+            results: Dict[str, Dict[str, Any]] = {}
+            for raw_line in (proc.stdout or "").splitlines():
+                parts = raw_line.strip().lstrip("/").split("|")
+                if len(parts) != 3:
+                    continue
+                c_name, running_s, health_s = parts
+                running = running_s.strip().lower() == "true"
+                health = health_s.strip().lower()
+                results[c_name] = {
+                    "running": running,
+                    "health": health,
+                    "ok": running and health in ("healthy", "none", ""),
+                }
+            return results if results else None
+        except Exception:
+            return None
+
+    def get_oci_containers_and_backups(
+        self, now_utc: Optional[datetime.datetime] = None
+    ) -> Dict[str, Any]:
+        """Collects OCI container health and Git/Vault nightly backup freshness."""
+        now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=datetime.timezone.utc)
+
+        expected = ("adguard", "uptime-kuma", "couchdb")
+        containers = self._inspect_docker_containers(expected)
+        unhealthy: List[str] = []
+        if containers is not None:
+            for svc in expected:
+                st = containers.get(svc)
+                if not st or not st.get("ok"):
+                    reason = (
+                        f"{st.get('health', 'stopped')}" if st and not st.get("running")
+                        else (st.get("health", "missing") if st else "missing")
+                    )
+                    unhealthy.append(f"{svc} ({reason})")
+
+        def _read_status(filename: str) -> Optional[Dict[str, Any]]:
+            fp = self.backup_status_dir / filename
+            if not fp.exists():
+                return None
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else None
+            except Exception:
+                return None
+
+        git_status = _read_status("backup-status.json")
+        git_ok: Optional[bool] = None
+        git_age_h: Optional[float] = None
+        git_err: Optional[str] = None
+        if git_status is not None:
+            git_ok = bool(git_status.get("ok"))
+            git_err = git_status.get("error")
+            checked_dt = self._parse_iso_utc(git_status.get("checked_at"))
+            if checked_dt is not None:
+                git_age_h = round(max(0.0, (now - checked_dt).total_seconds() / 3600.0), 1)
+        elif (self.backup_status_dir / "votes.sql").exists():
+            mtime = (self.backup_status_dir / "votes.sql").stat().st_mtime
+            git_ok = True
+            git_age_h = round(max(0.0, (now.timestamp() - mtime) / 3600.0), 1)
+
+        vault_status = _read_status("vault-backup-status.json")
+        vault_ok: Optional[bool] = None
+        vault_age_h: Optional[float] = None
+        vault_pending_par = False
+        vault_uploaded = False
+        vault_err: Optional[str] = None
+        if vault_status is not None:
+            vault_ok = bool(vault_status.get("ok"))
+            vault_pending_par = bool(vault_status.get("pending_par_setup"))
+            vault_uploaded = bool(vault_status.get("uploaded_offbox"))
+            vault_err = vault_status.get("error")
+            checked_dt = self._parse_iso_utc(vault_status.get("checked_at"))
+            if checked_dt is not None:
+                vault_age_h = round(max(0.0, (now - checked_dt).total_seconds() / 3600.0), 1)
+
+        parts: List[str] = []
+        if containers is not None:
+            healthy_cnt = len(expected) - len(unhealthy)
+            if unhealthy:
+                parts.append(f"🔴 Containers {healthy_cnt}/{len(expected)}: {', '.join(unhealthy)}")
+            else:
+                parts.append(f"🟢 Containers {healthy_cnt}/{len(expected)} healthy")
+        else:
+            parts.append("⚪ Containers (OCI host only)")
+
+        if git_ok is True:
+            age_txt = f"{git_age_h}h ago" if git_age_h is not None else "ok"
+            prefix = "🔴" if (git_age_h is not None and git_age_h > 30.0) else "🟢"
+            parts.append(f"{prefix} Git backup: {age_txt}")
+        elif git_ok is False:
+            parts.append(f"🔴 Git backup FAILED ({git_err or 'check logs'})")
+        else:
+            parts.append("⚪ Git backup pending")
+
+        if vault_ok is True:
+            age_txt = f"{vault_age_h}h ago" if vault_age_h is not None else "ok"
+            if vault_pending_par and not vault_uploaded:
+                parts.append(f"🟡 Vault local: {age_txt} (PAR URL unset)")
+            else:
+                prefix = "🔴" if (vault_age_h is not None and vault_age_h > 30.0) else "🟢"
+                parts.append(f"{prefix} Vault OCI: {age_txt}")
+        elif vault_ok is False:
+            parts.append(f"🔴 Vault backup FAILED ({vault_err or 'check logs'})")
+        else:
+            parts.append("⚪ Vault snapshot pending")
+
+        return {
+            "containers_available": containers is not None,
+            "containers": containers or {},
+            "unhealthy_containers": unhealthy,
+            "git_backup_ok": git_ok,
+            "git_backup_age_hours": git_age_h,
+            "git_backup_error": git_err,
+            "vault_backup_ok": vault_ok,
+            "vault_backup_age_hours": vault_age_h,
+            "vault_pending_par": vault_pending_par,
+            "vault_uploaded_offbox": vault_uploaded,
+            "vault_backup_error": vault_err,
+            "summary": " • ".join(parts),
+        }
+
+    def get_droidzero_pulse(
+        self, now_utc: Optional[datetime.datetime] = None
+    ) -> Dict[str, Any]:
+        """Read-only 24h traffic, photo likes, subscribers, and unread contact metrics from votes.db."""
+        pulse: Dict[str, Any] = {
+            "available": False,
+            "views_24h": 0,
+            "unique_visitors_24h": 0,
+            "likes_24h": 0,
+            "total_likes": 0,
+            "unread_contacts": 0,
+            "active_subscribers": 0,
+            "pending_subscribers": 0,
+            "summary": "⚪ Local DB unavailable (runs on OCI host)",
+        }
+        db_path = self.droidzero_db_path
+        if not db_path or not db_path.exists():
+            return pulse
+
+        now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=datetime.timezone.utc)
+        cutoff_str = (now - datetime.timedelta(hours=24)).astimezone(
+            datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        conn = None
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+            cur = conn.cursor()
+
+            def _has_table(name: str) -> bool:
+                cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                    (name,),
+                )
+                return cur.fetchone() is not None
+
+            if _has_table("site_visits"):
+                cur.execute(
+                    "SELECT COUNT(*), COUNT(DISTINCT visitor_hash) FROM site_visits "
+                    "WHERE REPLACE(SUBSTR(COALESCE(visited_at, ''), 1, 19), 'T', ' ') >= ?",
+                    (cutoff_str,),
+                )
+                row = cur.fetchone()
+                pulse["views_24h"] = int(row[0] or 0)
+                pulse["unique_visitors_24h"] = int(row[1] or 0)
+
+            if _has_table("vote_log"):
+                cur.execute(
+                    "SELECT COUNT(*) FROM vote_log "
+                    "WHERE REPLACE(SUBSTR(COALESCE(voted_at, ''), 1, 19), 'T', ' ') >= ?",
+                    (cutoff_str,),
+                )
+                pulse["likes_24h"] = int((cur.fetchone() or [0])[0] or 0)
+
+            if _has_table("photo_votes"):
+                cur.execute("SELECT COALESCE(SUM(vote_count), 0) FROM photo_votes")
+                pulse["total_likes"] = int((cur.fetchone() or [0])[0] or 0)
+
+            if _has_table("contact_submissions"):
+                cur.execute(
+                    "SELECT COUNT(*) FROM contact_submissions "
+                    "WHERE status IN ('received', 'unread') OR status IS NULL"
+                )
+                pulse["unread_contacts"] = int((cur.fetchone() or [0])[0] or 0)
+
+            if _has_table("subscribers"):
+                cur.execute(
+                    "SELECT "
+                    "COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0), "
+                    "COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) "
+                    "FROM subscribers"
+                )
+                srow = cur.fetchone() or (0, 0)
+                pulse["active_subscribers"] = int(srow[0] or 0)
+                pulse["pending_subscribers"] = int(srow[1] or 0)
+
+            pulse["available"] = True
+            contact_badge = (
+                f"📩 {pulse['unread_contacts']} unread contact{'s' if pulse['unread_contacts'] != 1 else ''}"
+                if pulse["unread_contacts"] > 0
+                else "0 unread contacts"
+            )
+            sub_txt = f"{pulse['active_subscribers']} active"
+            if pulse["pending_subscribers"] > 0:
+                sub_txt += f" (+{pulse['pending_subscribers']} pending)"
+            pulse["summary"] = (
+                f"🟢 24h: {pulse['views_24h']} views ({pulse['unique_visitors_24h']} unique) • "
+                f"{pulse['likes_24h']} likes ({pulse['total_likes']} total) • "
+                f"{sub_txt} subs • {contact_badge}"
+            )
+        except Exception as err:
+            pulse["summary"] = f"⚪ Pulse unavailable ({str(err)[:30]})"
+        finally:
+            if conn is not None:
+                conn.close()
+        return pulse
 
     def get_chicago_weather(self) -> Dict[str, any]:
         """
@@ -1491,6 +1753,47 @@ class ApiHub:
         weather = api_data.get("weather", {})
         if weather.get("status") == "Unavailable" or "error" in str(weather.get("summary", "")).lower():
             incidents.append("Investigate Chicago weather API failure (Open-Meteo endpoint unreachable)")
+
+        # 6. OCI Containers & Hybrid Backups
+        oci_ops = api_data.get("oci_ops", {})
+        unhealthy = oci_ops.get("unhealthy_containers") or []
+        if unhealthy:
+            incidents.append(f"Investigate unhealthy OCI container(s): {', '.join(unhealthy)}")
+
+        if oci_ops.get("git_backup_ok") is False:
+            incidents.append(
+                f"Investigate DroidZero nightly Git backup failure ({oci_ops.get('git_backup_error') or 'see journalctl'})"
+            )
+        elif oci_ops.get("git_backup_age_hours") is not None:
+            try:
+                if float(oci_ops["git_backup_age_hours"]) > 30.0:
+                    incidents.append(
+                        f"Investigate DroidZero nightly Git backup staleness ({oci_ops['git_backup_age_hours']}h old)"
+                    )
+            except (ValueError, TypeError):
+                pass
+
+        if oci_ops.get("vault_backup_ok") is False:
+            incidents.append(
+                f"Investigate OCI Vault snapshot backup failure ({oci_ops.get('vault_backup_error') or 'see journalctl'})"
+            )
+        elif oci_ops.get("vault_backup_age_hours") is not None:
+            try:
+                if float(oci_ops["vault_backup_age_hours"]) > 30.0:
+                    incidents.append(
+                        f"Investigate OCI Vault snapshot backup staleness ({oci_ops['vault_backup_age_hours']}h old)"
+                    )
+            except (ValueError, TypeError):
+                pass
+
+        # 7. Unread DroidZero Contact Submissions
+        pulse = api_data.get("droidzero_pulse", {})
+        unread_contacts = int(pulse.get("unread_contacts") or 0)
+        if unread_contacts > 0:
+            plural = "s" if unread_contacts != 1 else ""
+            incidents.append(
+                f"Reply to {unread_contacts} unread DroidZero contact message{plural} in Admin Studio (https://droidzero.duckdns.org/admin/)"
+            )
 
         return incidents
 
