@@ -57,6 +57,9 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # DroidZero & Server Monitoring
 DROIDZERO_URL = os.getenv("DROIDZERO_URL", "https://droidzero.duckdns.org")
 UPTIME_KUMA_URL = os.getenv("UPTIME_KUMA_URL", "http://127.0.0.1:3001")
+DROIDZERO_ENV_PATH = Path(os.getenv("DROIDZERO_ENV_PATH", "/opt/droidzero-api/.env"))
+BACKUP_GITHUB_REPO = os.getenv("BACKUP_GITHUB_REPO", "droidzer0/droidzero-backups").strip()
+BACKUP_TOKEN_EXPIRES_ON = os.getenv("BACKUP_TOKEN_EXPIRES_ON", "").strip()
 
 # Google OAuth credentials paths (falls back across known locations)
 POSSIBLE_CREDS = [

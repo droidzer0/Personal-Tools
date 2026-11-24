@@ -2,9 +2,15 @@
 """
 Test script to verify Google Calendar integration and task rollover protection in daily-assistant.
 """
+import os
 import sys
-from datetime import date, timedelta
+import io
+import tempfile
+import urllib.error
+from datetime import date, datetime, timedelta
+from email.message import Message
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -331,6 +337,290 @@ def test_wednesday_vs_non_wednesday_generation():
     print("✅ Wednesday vs non-Wednesday generation test passed successfully!")
 
 
+def test_github_token_expiration_parsing():
+    print("Testing _parse_github_token_expiration across GitHub header formats...")
+    from modules.api_hub import _parse_github_token_expiration
+
+    assert _parse_github_token_expiration("2027-02-22 15:19:44 UTC") == datetime(2027, 2, 22, 15, 19, 44)
+    assert _parse_github_token_expiration("2027-02-22 15:19:44 -0800") == datetime(2027, 2, 22, 23, 19, 44)
+    assert _parse_github_token_expiration("2027-02-22 15:19:44 +0530") == datetime(2027, 2, 22, 9, 49, 44)
+    assert _parse_github_token_expiration("2027-02-22T23:19:44Z") == datetime(2027, 2, 22, 23, 19, 44)
+    assert _parse_github_token_expiration("2027-02-22T15:19:44-08:00") == datetime(2027, 2, 22, 23, 19, 44)
+    assert _parse_github_token_expiration("") is None
+    assert _parse_github_token_expiration("not-a-date") is None
+    assert _parse_github_token_expiration(None) is None
+    print("✅ _parse_github_token_expiration test passed successfully!")
+
+
+class _MockHTTPResponse:
+    def __init__(self, headers: dict, body: bytes = b"{}"):
+        self.headers = headers
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def _assert_token_not_leaked(dummy_token: str, info: dict, incidents: list):
+    for k, v in info.items():
+        assert dummy_token not in str(v), f"Raw token leaked in info[{k}]"
+    for inc in incidents:
+        assert dummy_token not in inc, "Raw token leaked in incident message"
+
+
+def test_backup_token_tracker_and_incidents():
+    print("Testing ApiHub._read_env_var, _check_github_backup_token, and extract_system_incidents...")
+    from modules.api_hub import ApiHub
+
+    dummy_token = "github_pat_TEST_SECRET_DO_NOT_LEAK_12345"
+    old_token = "github_pat_OLD_STALE_TOKEN_00000"
+    now_utc = datetime(2026, 11, 24, 15, 0, 0)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env_path = Path(tmpdir) / ".env"
+        env_path.write_text(
+            "# DroidZero env\n"
+            f'BACKUP_GITHUB_TOKEN="{old_token}"\n'
+            "GITHUB_TOKEN='ghp_unrelated_site_token'\n"
+            f"export BACKUP_GITHUB_TOKEN='{dummy_token}'\n",
+            encoding="utf-8",
+        )
+        assert ApiHub._read_env_var(env_path, "BACKUP_GITHUB_TOKEN") == dummy_token
+        assert ApiHub._read_env_var(env_path, "MISSING_KEY") is None
+        assert ApiHub._read_env_var(Path(tmpdir) / "nonexistent.env", "BACKUP_GITHUB_TOKEN") is None
+
+        clean_env = {k: v for k, v in os.environ.items() if k != "BACKUP_GITHUB_TOKEN"}
+        with patch.dict(os.environ, clean_env, clear=True):
+            hub = ApiHub(
+                droidzero_url="https://droidzero.duckdns.org",
+                gmail_creds_path=Path("."),
+                gmail_tokens_dir=Path("."),
+                droidzero_env_path=env_path,
+                backup_github_repo="droidzer0/droidzero-backups",
+            )
+
+            # 1. Live 200: 60 days out -> green, 0 incidents
+            with patch.object(ApiHub, "_check_systemd_timer", return_value="active"), patch(
+                "urllib.request.urlopen",
+                return_value=_MockHTTPResponse({"github-authentication-token-expiration": "2027-01-23 07:00:00 -0800"}),
+            ):
+                info = hub._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_days_remaining"] == 60
+            assert info["backup_token_expires_on"] == "2027-01-23"
+            assert info["backup_token_expired"] is False
+            assert info["backup_token_status"].startswith("🟢 60 days until expiration (expires 2027-01-23)")
+            assert "backup timer active" in info["backup_token_status"]
+            incidents = ApiHub.extract_system_incidents({"website": info})
+            assert incidents == []
+            _assert_token_not_leaked(dummy_token, info, incidents)
+
+            # 2. Live 200: 14 days out -> yellow, 1 incident
+            with patch.object(ApiHub, "_check_systemd_timer", return_value=None), patch(
+                "urllib.request.urlopen",
+                return_value=_MockHTTPResponse({"github-authentication-token-expiration": "2026-12-08 07:00:00 -0800"}),
+            ):
+                info = hub._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_days_remaining"] == 14
+            assert info["backup_token_status"] == "🟡 14 days until expiration (expires 2026-12-08)"
+            incidents = ApiHub.extract_system_incidents({"website": info})
+            assert len(incidents) == 1
+            assert "14 days until expiration" in incidents[0]
+            _assert_token_not_leaked(dummy_token, info, incidents)
+
+            # 3. Live 200: 5 days out -> red, 1 incident
+            with patch.object(ApiHub, "_check_systemd_timer", return_value=None), patch(
+                "urllib.request.urlopen",
+                return_value=_MockHTTPResponse({"github-authentication-token-expiration": "2026-11-29 15:00:00 UTC"}),
+            ):
+                info = hub._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_days_remaining"] == 5
+            assert info["backup_token_status"] == "🔴 5 days until expiration (expires 2026-11-29)"
+            incidents = ApiHub.extract_system_incidents({"website": info})
+            assert len(incidents) == 1
+            assert "5 days until expiration" in incidents[0]
+            _assert_token_not_leaked(dummy_token, info, incidents)
+
+            # 4. Live 200: < 24h remaining -> Expires today / < 1 day left, expired == False, 1 incident
+            with patch.object(ApiHub, "_check_systemd_timer", return_value=None), patch(
+                "urllib.request.urlopen",
+                return_value=_MockHTTPResponse({"github-authentication-token-expiration": "2026-11-24 23:00:00 UTC"}),
+            ):
+                info = hub._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_days_remaining"] == 0
+            assert info["backup_token_expired"] is False
+            assert info["backup_token_status"] == "🔴 Expires today / < 1 day left (expires 2026-11-24)"
+            incidents = ApiHub.extract_system_incidents({"website": info})
+            assert len(incidents) == 1
+            assert "0 days until expiration" in incidents[0]
+            _assert_token_not_leaked(dummy_token, info, incidents)
+
+            # 5. Live 200: no expiration header -> Valid (no expiration set), 0 incidents
+            with patch.object(ApiHub, "_check_systemd_timer", return_value=None), patch(
+                "urllib.request.urlopen",
+                return_value=_MockHTTPResponse({}),
+            ):
+                info = hub._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_no_expiry"] is True
+            assert info["backup_token_status"] == "🟢 Valid (no expiration set)"
+            assert ApiHub.extract_system_incidents({"website": info}) == []
+
+            # 6. Live HTTP 401 -> expired, immediate rotation incident
+            err_401 = urllib.error.HTTPError(
+                url="https://api.github.com/repos/droidzer0/droidzero-backups",
+                code=401,
+                msg="Unauthorized",
+                hdrs=Message(),
+                fp=io.BytesIO(b""),
+            )
+            with patch.object(ApiHub, "_check_systemd_timer", return_value=None), patch(
+                "urllib.request.urlopen",
+                side_effect=err_401,
+            ):
+                info = hub._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_expired"] is True
+            assert info["backup_token_status"].startswith("🔴 Expired / Unauthorized")
+            incidents = ApiHub.extract_system_incidents({"website": info})
+            assert len(incidents) == 1
+            assert "immediately" in incidents[0]
+            _assert_token_not_leaked(dummy_token, info, incidents)
+
+            # 7. Live HTTP 403 with expiration header -> expiration + permission warning incident
+            hdrs_403 = Message()
+            hdrs_403["github-authentication-token-expiration"] = "2027-01-23 15:00:00 UTC"
+            err_403 = urllib.error.HTTPError(
+                url="https://api.github.com/repos/droidzer0/droidzero-backups",
+                code=403,
+                msg="Forbidden",
+                hdrs=hdrs_403,
+                fp=io.BytesIO(b""),
+            )
+            with patch.object(ApiHub, "_check_systemd_timer", return_value=None), patch(
+                "urllib.request.urlopen",
+                side_effect=err_403,
+            ):
+                info = hub._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_days_remaining"] == 60
+            assert "HTTP 403" in info["backup_token_status"]
+            incidents = ApiHub.extract_system_incidents({"website": info})
+            assert len(incidents) == 1
+            assert "Check DroidZero backup GitHub token permissions" in incidents[0]
+            _assert_token_not_leaked(dummy_token, info, incidents)
+
+            # 8. Unreachable GitHub API + BACKUP_TOKEN_EXPIRES_ON fallback
+            hub_fallback = ApiHub(
+                droidzero_url="https://droidzero.duckdns.org",
+                gmail_creds_path=Path("."),
+                gmail_tokens_dir=Path("."),
+                droidzero_env_path=env_path,
+                backup_github_repo="droidzer0/droidzero-backups",
+                backup_token_expires_on="2027-02-22",
+            )
+            with patch.object(ApiHub, "_check_systemd_timer", return_value=None), patch(
+                "urllib.request.urlopen",
+                side_effect=OSError(f"Network down while sending {dummy_token}"),
+            ):
+                info = hub_fallback._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_source"] == "config_fallback"
+            assert info["backup_token_days_remaining"] == 90
+            assert info["backup_token_error"] is None
+            assert info["backup_token_status"] == "🟢 90 days until expiration (expires 2027-02-22)"
+            incidents = ApiHub.extract_system_incidents({"website": info})
+            assert incidents == []
+            _assert_token_not_leaked(dummy_token, info, incidents)
+
+            # 9. No token and no fallback -> white unavailable status, 0 false incidents
+            hub_none = ApiHub(
+                droidzero_url="https://droidzero.duckdns.org",
+                gmail_creds_path=Path("."),
+                gmail_tokens_dir=Path("."),
+                droidzero_env_path=Path(tmpdir) / "missing.env",
+            )
+            with patch.object(ApiHub, "_check_systemd_timer", return_value=None):
+                info = hub_none._check_github_backup_token(now_utc=now_utc)
+            assert info["backup_token_status"].startswith("⚪ Backup token expiry unavailable")
+            assert ApiHub.extract_system_incidents({"website": info}) == []
+
+    print("✅ Backup token tracker and incident tests passed successfully!")
+
+
+def test_backup_token_rendered_and_rollover_dedup():
+    print("Testing GeminiClient rendering and NoteParser expiry alert rollover dedup...")
+    client = GeminiClient(api_key="", model_name="gemini-2.5-flash")
+    prev_data = {"incomplete_tasks": ["Rotate personal SSH keys"], "scratchpad_notes": []}
+    workout_data = {
+        "title": "Full Body Strength A",
+        "category": "Strength",
+        "goal": "Build foundation",
+        "exercises": [],
+        "desk_mobility": "Cat-cow stretch",
+    }
+    status_str = "🟢 89 days until expiration (expires 2027-02-22) • backup timer active"
+    api_data = {
+        "website": {
+            "message": "🟢 Online (HTTP 200)",
+            "duckdns_status": "🟢 Active (droidzero.duckdns.org → 147.224.207.15)",
+            "cert_status": "🟢 56 days until expiration (expires 2027-01-19)",
+            "backup_token_status": status_str,
+        },
+        "instance": {"load_avg": "0.10, 0.10, 0.10", "disk_free_gb": "80.0 GB"},
+        "weather": {"summary": "45°F • Clear"},
+        "markets": [{"display": "**VOO**: $680.00 (🟢 +0.50%)"}],
+        "gmail": {"status": "🟢 0 unread"},
+        "calendar": {"calendar_lines": [], "status": "🟢 0 events"},
+    }
+
+    target = date(2026, 11, 24)
+    prompt = client._build_prompt(
+        today_str=target.strftime("%Y-%m-%d"),
+        weekday_name=target.strftime("%A"),
+        prev=prev_data,
+        workout=workout_data,
+        apis=api_data,
+    )
+    assert f"- GitHub Backup Token (`backup-token`): {status_str}" in prompt
+    assert "**🔑 GitHub Backup Token**" in prompt
+
+    note = client.generate_daily_note(
+        today=target,
+        previous_note_data=prev_data,
+        workout_data=workout_data,
+        api_data=api_data,
+    )
+    assert f"| **🔑 GitHub Backup Token** | {status_str} |" in note
+
+    # Rollover dedup: auto-generated expiry alerts must not stack across consecutive days
+    sample_note = """---
+date: 2026-11-24
+tags: [daily-note]
+type: daily-note
+---
+
+## 🎯 To-do
+
+### 📋 Priorities & Tasks
+- [ ] ⚠️ Rotate DroidZero backup GitHub token: 14 days until expiration (2026-12-08) — update BACKUP_GITHUB_TOKEN in /opt/droidzero-api/.env
+- [ ] ⚠️ Renew DroidZero SSL certificate: 12 days until expiration (2026-12-06)
+- [ ] ⚠️ Renew or disable Tailscale node key expiry: 10 days until expiration (2026-12-04)
+- [ ] Rotate personal SSH keys
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        note_file = Path(tmpdir) / "2026-11-24.md"
+        note_file.write_text(sample_note, encoding="utf-8")
+        parser = NoteParser(Path(tmpdir), recurring_tasks=config.get_all_recurring_tasks())
+        parsed = parser.parse_note_content(note_file)
+        assert parsed["incomplete_tasks"] == ["Rotate personal SSH keys"], (
+            f"Expected only regular user task to roll over, got: {parsed['incomplete_tasks']}"
+        )
+
+    print("✅ Backup token rendering and rollover dedup tests passed successfully!")
+
+
 if __name__ == "__main__":
     test_note_parser_rollover()
     test_deterministic_generation_with_calendar()
@@ -338,5 +628,8 @@ if __name__ == "__main__":
     test_mandatory_tasks_schedule()
     test_medication_rollover_protection()
     test_wednesday_vs_non_wednesday_generation()
+    test_github_token_expiration_parsing()
+    test_backup_token_tracker_and_incidents()
+    test_backup_token_rendered_and_rollover_dedup()
     print("\n🎉 All tests passed!")
 

@@ -48,7 +48,10 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
     api_hub = ApiHub(
         config.DROIDZERO_URL,
         config.GMAIL_CREDENTIALS_PATH,
-        config.GMAIL_TOKENS_DIR
+        config.GMAIL_TOKENS_DIR,
+        droidzero_env_path=config.DROIDZERO_ENV_PATH,
+        backup_github_repo=config.BACKUP_GITHUB_REPO,
+        backup_token_expires_on=config.BACKUP_TOKEN_EXPIRES_ON,
     )
     gemini_client = GeminiClient(
         config.GEMINI_API_KEY,
@@ -145,6 +148,8 @@ def run_orchestration(target_date: date, dry_run: bool = False, force: bool = Fa
         print(f"    DuckDNS:   {website_status['duckdns_status']}")
     if website_status.get("cert_status"):
         print(f"    TLS Certs: {website_status['cert_status']}")
+    if website_status.get("backup_token_status"):
+        print(f"    Backup PAT: {website_status['backup_token_status']}")
 
     instance_health = api_hub.get_instance_health()
     print(f"    Instance Load: {instance_health['load_avg']} | Free Disk: {instance_health['disk_free_gb']}")

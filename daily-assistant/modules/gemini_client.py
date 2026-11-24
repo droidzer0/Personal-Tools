@@ -217,6 +217,7 @@ Input Data:
 - Website (DroidZero): {apis.get('website', {}).get('message', 'Online')}
 - DuckDNS (droidzero.duckdns.org): {apis.get('website', {}).get('duckdns_status', '🟢 Active')}
 - SSL/TLS Certificates: {apis.get('website', {}).get('cert_status', '🟢 Valid')}
+- GitHub Backup Token (`backup-token`): {apis.get('website', {}).get('backup_token_status', '⚪ Unavailable')}
 - Server Instance Load: {apis.get('instance', {}).get('load_avg', 'Normal')} | Disk Free: {apis.get('instance', {}).get('disk_free_gb', 'N/A')}
 - Chicago Weather: {apis.get('weather', {}).get('summary', 'Seasonal')}
 - Gmail Triage: {apis.get('gmail', {}).get('status', 'Ready')}
@@ -286,6 +287,7 @@ workout_completed: false
        - **🌐 DroidZero Site**: HTTP status, latency, and brief SSL summary
        - **🦆 DuckDNS (`droidzero.duckdns.org`)**: Exact DuckDNS resolution IP, dynamic DNS timer/renewal status, SSL countdown, and domain expiration status from Input Data
        - **🔒 SSL/TLS Certificates**: Exact days until expiration (`X days until expiration`), expiration date (`YYYY-MM-DD`), issuer, and Tailscale key expiry status if present in Input Data
+       - **🔑 GitHub Backup Token**: Exact days until expiration (`X days until expiration`), expiration date (`YYYY-MM-DD`), and backup timer status from Input Data
        - **🖥️ OCI Instance**: VM load averages and free disk space
        - **📧 Gmail Inboxes**: Unread triage counts across accounts
        - **📅 Google Calendar**: Today's event count and sync status
@@ -554,6 +556,20 @@ workout_completed: false
                 cert_status = f"🟢 {ssl_days} days until expiration (expires {exp_on})"
             else:
                 cert_status = "⚪ Certificate expiry unavailable"
+        backup_token_status = website_data.get('backup_token_status')
+        if not backup_token_status:
+            if website_data.get('backup_token_expired'):
+                exp_on = website_data.get('backup_token_expires_on') or 'unknown'
+                backup_token_status = f"🔴 Expired (expired {exp_on} — rotate BACKUP_GITHUB_TOKEN)"
+            else:
+                bt_days = website_data.get('backup_token_days_remaining')
+                if bt_days is not None:
+                    exp_on = website_data.get('backup_token_expires_on', 'unknown')
+                    emoji = "🟢" if bt_days >= 21 else ("🟡" if bt_days >= 7 else "🔴")
+                    day_word = "day" if bt_days == 1 else "days"
+                    backup_token_status = f"{emoji} {bt_days} {day_word} until expiration (expires {exp_on})"
+                else:
+                    backup_token_status = "⚪ Backup token expiry unavailable"
 
         return f"""---
 date: {today_str}
@@ -594,6 +610,7 @@ workout_completed: false
 | **🌐 DroidZero Site** | {website_data.get('message', 'Online')} | [[00-DroidZero-Master-Hub|Master Hub]] |
 | **🦆 DuckDNS (`droidzero.duckdns.org`)** | {duckdns_status} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **🔒 SSL/TLS Certificates** | {cert_status} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
+| **🔑 GitHub Backup Token** | {backup_token_status} | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **🖥️ OCI Instance** | Load: `{apis.get('instance', {}).get('load_avg', 'N/A')}` • Disk Free: `{apis.get('instance', {}).get('disk_free_gb', 'N/A')}` | [[03-Infrastructure-and-Backend-API|API Blueprint]] |
 | **📧 Gmail Inboxes** | {apis.get('gmail', {}).get('status', 'Ready')} | [[Subscriptions Report|Subscriptions]] |
 | **📅 Google Calendar** | {cal_data.get('status', 'Ready')} | [[Dashboard|Command Center]] |

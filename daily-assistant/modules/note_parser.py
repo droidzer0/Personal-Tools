@@ -49,6 +49,14 @@ class NoteParser:
 
         return False
 
+    @staticmethod
+    def _is_generated_expiry_alert(task_text: str) -> bool:
+        """Returns True for auto-generated system expiration countdown alerts that regenerate daily."""
+        return bool(re.match(
+            r'^(?:⚠️|🚨)\s*(?:Rotate DroidZero backup GitHub token|Renew DroidZero SSL certificate|Renew or disable Tailscale node key expiry)\b',
+            task_text.strip(),
+        ))
+
     def get_note_path_for_date(self, note_date: date) -> Optional[Path]:
         """
         Returns the Path to a daily note for note_date, checking the nested
@@ -175,7 +183,12 @@ class NoteParser:
                     "all day" in task_text.lower() or
                     bool(re.search(r'\b\d{1,2}:\d{2}\s*(?:am|pm)\b', task_text, re.IGNORECASE))
                 )
-                if not in_workout and not is_calendar_event and not self._is_recurring_task(task_text):
+                if (
+                    not in_workout
+                    and not is_calendar_event
+                    and not self._is_recurring_task(task_text)
+                    and not self._is_generated_expiry_alert(task_text)
+                ):
                     incomplete_tasks.append(task_text)
                 elif in_workout:
                     current_exercise = self._extract_exercise_name(task_text)

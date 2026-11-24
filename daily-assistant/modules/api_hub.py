@@ -100,11 +100,67 @@ def _decode_der_cert_fallback(der_bytes: bytes) -> Dict[str, Optional[str]]:
 
     return {"notAfter": not_after_str, "issuer": issuer_name}
 
+
+def _parse_github_token_expiration(raw_value: str) -> Optional[datetime.datetime]:
+    """Parses GitHub's github-authentication-token-expiration header into a naive UTC datetime."""
+    if not raw_value or not isinstance(raw_value, str):
+        return None
+    norm = re.sub(r"\s+", " ", raw_value.strip())
+    if not norm:
+        return None
+
+    for fmt in ("%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%d %H:%M:%S %z"):
+        try:
+            dt = datetime.datetime.strptime(norm, fmt)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            return dt
+        except ValueError:
+            continue
+
+    try:
+        iso_candidate = norm[:-1] + "+00:00" if norm.endswith("Z") else norm
+        dt = datetime.datetime.fromisoformat(iso_candidate)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        return None
+
+
+def _get_header_ci(headers: Any, name: str) -> Optional[str]:
+    """Case-insensitive header lookup supporting both HTTPMessage and dict mocks."""
+    if not headers:
+        return None
+    val = headers.get(name) if hasattr(headers, "get") else None
+    if val is not None:
+        return val
+    target = name.lower()
+    if hasattr(headers, "items"):
+        for k, v in headers.items():
+            if str(k).lower() == target:
+                return v
+    return None
+
+
 class ApiHub:
-    def __init__(self, droidzero_url: str, gmail_creds_path: Path, gmail_tokens_dir: Path):
+    def __init__(
+        self,
+        droidzero_url: str,
+        gmail_creds_path: Path,
+        gmail_tokens_dir: Path,
+        droidzero_env_path: Optional[Path] = None,
+        backup_github_repo: str = "droidzer0/droidzero-backups",
+        backup_token_expires_on: str = "",
+    ):
         self.droidzero_url = droidzero_url
         self.gmail_creds_path = gmail_creds_path
         self.gmail_tokens_dir = gmail_tokens_dir
+        self.droidzero_env_path = (
+            droidzero_env_path if droidzero_env_path is not None else Path("/opt/droidzero-api/.env")
+        )
+        self.backup_github_repo = (backup_github_repo or "droidzer0/droidzero-backups").strip()
+        self.backup_token_expires_on = (backup_token_expires_on or "").strip()
         self.ssl_ctx = get_ssl_context()
 
     def _inspect_tls_certificate(self, hostname: str, port: int = 443) -> Dict[str, Any]:
@@ -227,6 +283,168 @@ class ApiHub:
             pass
         return info
 
+    @staticmethod
+    def _read_env_var(env_path: Optional[Path], key: str) -> Optional[str]:
+        """Reads an environment variable from a dotenv file (last matching assignment wins)."""
+        if not env_path:
+            return None
+        try:
+            if not env_path.exists() or not env_path.is_file():
+                return None
+            content = env_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+        found: Optional[str] = None
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() != key:
+                continue
+            val = v.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            if val:
+                found = val
+        return found
+
+    def _check_github_backup_token(self, now_utc: Optional[datetime.datetime] = None) -> Dict[str, Any]:
+        """Checks DroidZero backup GitHub PAT expiration via GitHub API header with config fallback."""
+        info: Dict[str, Any] = {
+            "backup_token_days_remaining": None,
+            "backup_token_expires_on": None,
+            "backup_token_source": None,
+            "backup_token_expired": False,
+            "backup_token_no_expiry": False,
+            "backup_token_error": None,
+            "backup_timer": self._check_systemd_timer(("droidzero-backup.timer",)),
+            "backup_token_status": "",
+        }
+        now = now_utc or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        if now.tzinfo is not None:
+            now = now.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+        token = os.getenv("BACKUP_GITHUB_TOKEN", "").strip() or self._read_env_var(
+            self.droidzero_env_path, "BACKUP_GITHUB_TOKEN"
+        )
+
+        def apply_expiration_header(raw_exp: Optional[str]) -> bool:
+            if not raw_exp:
+                return False
+            exp_dt = _parse_github_token_expiration(raw_exp)
+            if not exp_dt:
+                return False
+            info["backup_token_source"] = "github_api"
+            info["backup_token_expires_on"] = exp_dt.strftime("%Y-%m-%d")
+            info["backup_token_days_remaining"] = (exp_dt - now).days
+            info["backup_token_expired"] = (exp_dt <= now)
+            return True
+
+        # Tier 1: Live GitHub API probe
+        if token:
+            api_url = f"https://api.github.com/repos/{self.backup_github_repo}"
+            req = urllib.request.Request(
+                api_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "User-Agent": "LifeDashboardBot/1.0",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5, context=self.ssl_ctx) as resp:
+                    raw_exp = _get_header_ci(resp.headers, "github-authentication-token-expiration")
+                    if not raw_exp:
+                        info["backup_token_no_expiry"] = True
+                        info["backup_token_source"] = "github_api"
+                    elif not apply_expiration_header(raw_exp):
+                        info["backup_token_error"] = "Unrecognized GitHub token expiration header"
+            except urllib.error.HTTPError as he:
+                raw_exp = _get_header_ci(getattr(he, "headers", None), "github-authentication-token-expiration")
+                if he.code == 401:
+                    apply_expiration_header(raw_exp)
+                    info["backup_token_expired"] = True
+                    if info["backup_token_days_remaining"] is None:
+                        info["backup_token_days_remaining"] = 0
+                    info["backup_token_source"] = "github_api"
+                    info["backup_token_error"] = "HTTP 401 Unauthorized (token expired or revoked)"
+                elif he.code in (403, 404):
+                    apply_expiration_header(raw_exp)
+                    info["backup_token_error"] = (
+                        f"HTTP {he.code} on {self.backup_github_repo} (check token repo permissions)"
+                    )
+                else:
+                    apply_expiration_header(raw_exp)
+                    info["backup_token_error"] = f"HTTP {he.code} from GitHub API"
+            except Exception:
+                info["backup_token_error"] = "GitHub API unreachable"
+
+        # Tier 2: Static configured expiration date fallback
+        if (
+            info["backup_token_days_remaining"] is None
+            and not info["backup_token_expired"]
+            and not info["backup_token_no_expiry"]
+            and self.backup_token_expires_on
+        ):
+            try:
+                exp_date = datetime.date.fromisoformat(self.backup_token_expires_on)
+                remaining = (exp_date - now.date()).days
+                info["backup_token_days_remaining"] = remaining
+                info["backup_token_expires_on"] = exp_date.strftime("%Y-%m-%d")
+                info["backup_token_source"] = "config_fallback"
+                info["backup_token_expired"] = (remaining < 0)
+                if info["backup_token_error"] == "GitHub API unreachable":
+                    info["backup_token_error"] = None
+            except ValueError:
+                if not info["backup_token_error"]:
+                    info["backup_token_error"] = (
+                        "Invalid BACKUP_TOKEN_EXPIRES_ON date format (expected YYYY-MM-DD)"
+                    )
+
+        # Format human-readable summary
+        parts = []
+        err = info["backup_token_error"]
+        err_used_in_primary = False
+        if info["backup_token_expired"]:
+            if err and "401" in err:
+                parts.append("🔴 Expired / Unauthorized (HTTP 401 — rotate BACKUP_GITHUB_TOKEN)")
+                err_used_in_primary = True
+            else:
+                exp_on = info["backup_token_expires_on"] or "unknown"
+                parts.append(f"🔴 Expired (expired {exp_on} — rotate BACKUP_GITHUB_TOKEN)")
+        elif info["backup_token_days_remaining"] is not None:
+            days = info["backup_token_days_remaining"]
+            exp_on = info["backup_token_expires_on"] or "unknown"
+            emoji = "🟢" if days >= 21 else ("🟡" if days >= 7 else "🔴")
+            if days == 0:
+                parts.append(f"🔴 Expires today / < 1 day left (expires {exp_on})")
+            else:
+                day_word = "day" if days == 1 else "days"
+                parts.append(f"{emoji} {days} {day_word} until expiration (expires {exp_on})")
+        elif info["backup_token_no_expiry"]:
+            parts.append("🟢 Valid (no expiration set)")
+        elif err:
+            parts.append(f"🟡 Token check failed ({err})")
+            err_used_in_primary = True
+        else:
+            parts.append("⚪ Backup token expiry unavailable (checked on OCI or via BACKUP_TOKEN_EXPIRES_ON)")
+
+        if info["backup_timer"] == "active":
+            parts.append("backup timer active")
+
+        if err and not err_used_in_primary:
+            parts.append(f"⚠️ {err}")
+
+        info["backup_token_status"] = " • ".join(parts)
+        return info
+
     def check_website_status(self, url: Optional[str] = None) -> Dict[str, any]:
         """Checks DroidZero availability, DuckDNS resolution, and TLS certificate expiration."""
         target_url = url or self.droidzero_url or "https://droidzero.duckdns.org"
@@ -250,6 +468,14 @@ class ApiHub:
             "certbot_timer": None,
             "tailscale_key_days_remaining": None,
             "tailscale_key_expires_on": None,
+            "backup_token_days_remaining": None,
+            "backup_token_expires_on": None,
+            "backup_token_source": None,
+            "backup_token_expired": False,
+            "backup_token_no_expiry": False,
+            "backup_token_error": None,
+            "backup_timer": None,
+            "backup_token_status": "",
             "duckdns_status": "",
             "cert_status": "",
             "message": ""
@@ -287,12 +513,13 @@ class ApiHub:
             cert_info = self._inspect_tls_certificate(hostname, cert_port)
             result.update(cert_info)
 
-        # 4. Inspect OCI systemd renewal timers & Tailscale key expiry when running on Linux
+        # 4. Inspect OCI systemd renewal timers, Tailscale key expiry, & backup GitHub PAT
         result["duckdns_timer"] = self._check_systemd_timer(("duckdns.timer",))
         result["certbot_timer"] = self._check_systemd_timer(("certbot.timer", "snap.certbot.renew.timer"))
         ts_info = self._check_tailscale_key_expiry()
         result["tailscale_key_days_remaining"] = ts_info["tailscale_key_days_remaining"]
         result["tailscale_key_expires_on"] = ts_info["tailscale_key_expires_on"]
+        result.update(self._check_github_backup_token())
 
         # 5. Format concise human-readable summaries
         ssl_days = result["ssl_days_remaining"]
@@ -1213,6 +1440,25 @@ class ApiHub:
                     incidents.append(f"Renew or disable Tailscale node key expiry: {ts_days} days until expiration ({ts_exp})")
             except (ValueError, TypeError):
                 pass
+
+        backup_expired = bool(website.get("backup_token_expired"))
+        backup_days = website.get("backup_token_days_remaining")
+        backup_exp = website.get("backup_token_expires_on") or "unknown"
+        backup_err = str(website.get("backup_token_error") or "")
+        if backup_expired:
+            incidents.append(
+                f"Rotate DroidZero backup GitHub token immediately: token expired ({backup_exp}) — update BACKUP_GITHUB_TOKEN in /opt/droidzero-api/.env"
+            )
+        elif backup_days is not None:
+            try:
+                if int(backup_days) <= 14:
+                    incidents.append(
+                        f"Rotate DroidZero backup GitHub token: {backup_days} days until expiration ({backup_exp}) — update BACKUP_GITHUB_TOKEN in /opt/droidzero-api/.env"
+                    )
+            except (ValueError, TypeError):
+                pass
+        if "403" in backup_err or "404" in backup_err:
+            incidents.append(f"Check DroidZero backup GitHub token permissions: {backup_err}")
 
         # 2. Server Instance Health (OCI VM)
         instance = api_data.get("instance", {})
